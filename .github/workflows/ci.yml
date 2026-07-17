@@ -1,0 +1,110 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+            generator: Unix Makefiles
+            shader_platform: linux-x86_64
+            shader_compiler: glslc
+            unified_archive: hltools-linux-x64.tar.gz
+            stages_archive: hltools-stages-linux-x64.tar.gz
+          - name: windows
+            os: windows-2022
+            generator: Visual Studio 17 2022
+            shader_platform: windows-x86_64
+            shader_compiler: glslc.exe
+            unified_archive: hltools-windows-x64.zip
+            stages_archive: hltools-stages-windows-x64.zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $glslc = Join-Path $env:ANDROID_NDK_LATEST_HOME "shader-tools/${{ matrix.shader_platform }}/${{ matrix.shader_compiler }}"
+          if (!(Test-Path -LiteralPath $glslc)) {
+              throw "glslc was not found at $glslc"
+          }
+
+          cmake `
+              -S . `
+              -B build `
+              -G "${{ matrix.generator }}" `
+              -DBUILD_TESTING=ON `
+              -DHLTOOLS_GPU=ON `
+              "-DGLSLC_EXECUTABLE=$glslc" `
+              -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p package/unified package/stages
+          cp bin/hltools package/unified/
+          cp bin/stages/* package/stages/
+          cp README.md LICENSE package/unified/
+          cp README.md LICENSE package/stages/
+          tar -czf "${{ matrix.unified_archive }}" -C package/unified .
+          tar -czf "${{ matrix.stages_archive }}" -C package/stages .
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package/unified | Out-Null
+          New-Item -ItemType Directory -Path package/stages | Out-Null
+          Copy-Item bin/hltools.exe package/unified/
+          Copy-Item bin/stages/*.exe package/stages/
+          Copy-Item README.md package/unified/
+          Copy-Item LICENSE package/unified/
+          Copy-Item README.md package/stages/
+          Copy-Item LICENSE package/stages/
+          Compress-Archive -Path package/unified/* -DestinationPath "${{ matrix.unified_archive }}"
+          Compress-Archive -Path package/stages/* -DestinationPath "${{ matrix.stages_archive }}"
+
+      - name: Upload unified archive
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ matrix.unified_archive }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload standalone stages archive
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ matrix.stages_archive }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
