@@ -83,6 +83,7 @@ add_hltools_unit(unit_decompile
         unit/decompile/source_entities.cpp
         unit/decompile/source_materials.cpp
         unit/decompile/source_models.cpp
+        unit/decompile/source_skybox.cpp
     LIBRARIES hltools_decompile
     LABEL unit.decompile)
 
