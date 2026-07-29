@@ -100,6 +100,7 @@ add_library(hltools_format STATIC
     src/format/bsp/lightmap_atlas.cpp
     src/format/bsp/texture_lump.cpp
     src/format/bsp/usage_chart.cpp
+    src/format/map/document.cpp
     src/format/miptex/texture.cpp
     src/format/rad/texlights.cpp
     src/format/wad/archive.cpp
