@@ -122,6 +122,7 @@ add_library(hltools_decompile STATIC
     src/decompile/source_displacements.cpp
     src/decompile/source_entities.cpp
     src/decompile/source_materials.cpp
+    src/decompile/source_models.cpp
 )
 target_include_directories(hltools_decompile PUBLIC src)
 target_link_libraries(hltools_decompile PUBLIC hltools_format hltools_math hltools_common)

@@ -82,6 +82,7 @@ add_hltools_unit(unit_decompile
         unit/decompile/source_displacements.cpp
         unit/decompile/source_entities.cpp
         unit/decompile/source_materials.cpp
+        unit/decompile/source_models.cpp
     LIBRARIES hltools_decompile
     LABEL unit.decompile)
 
