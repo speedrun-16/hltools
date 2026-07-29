@@ -121,6 +121,7 @@ add_library(hltools_decompile STATIC
     src/decompile/map_decompiler.cpp
     src/decompile/source_displacements.cpp
     src/decompile/source_entities.cpp
+    src/decompile/source_map_decompiler.cpp
     src/decompile/source_materials.cpp
     src/decompile/source_models.cpp
     src/decompile/source_skybox.cpp
