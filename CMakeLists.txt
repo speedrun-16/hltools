@@ -119,6 +119,7 @@ target_link_libraries(hltools_format PUBLIC hltools_common)
 # decompile: read only bsp tree reconstruction and valve 220 map writing
 add_library(hltools_decompile STATIC
     src/decompile/map_decompiler.cpp
+    src/decompile/source_displacements.cpp
     src/decompile/source_entities.cpp
     src/decompile/source_materials.cpp
 )
