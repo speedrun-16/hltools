@@ -123,6 +123,13 @@ add_library(hltools_decompile STATIC
 target_include_directories(hltools_decompile PUBLIC src)
 target_link_libraries(hltools_decompile PUBLIC hltools_format hltools_math hltools_common)
 
+# model asset generators and converters
+add_library(hltools_model STATIC
+    src/model/skybox_model.cpp
+)
+target_include_directories(hltools_model PUBLIC src)
+target_link_libraries(hltools_model PUBLIC hltools_format hltools_common)
+
 # vis: portal file loading, pvs flow, and visibility lump compression
 add_library(hltools_vis STATIC
     src/vis/vis.cpp

@@ -76,6 +76,13 @@ add_hltools_unit(unit_format
     LIBRARIES hltools_format
     LABEL unit.format)
 
+add_hltools_unit(unit_model
+    PREFIX "unit.model."
+    SOURCES
+        unit/model/skybox_model.cpp
+    LIBRARIES hltools_model
+    LABEL unit.model)
+
 add_hltools_unit(unit_math
     PREFIX "unit.math."
     SOURCES unit/math/winding.cpp
