@@ -1,14 +1,21 @@
 #include "bsp_tool.h"
 
+#include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "../../common/error.h"
 #include "../../common/filesystem.h"
 #include "../../common/log.h"
+#include "../../common/string_util.h"
 #include "../../common/threads.h"
+#include "bsp/pack.h"
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
+
+namespace stdfs = std::filesystem;
 
 namespace tools
 {
@@ -38,6 +45,7 @@ namespace tools
             logging::console(
                 "usage\n"
                 "  hltools bsp [options] <map>        (standalone: hlbsp)\n"
+                "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
                 "\n"
                 "  builds the bsp trees for all four hulls from csg's plane lists,\n"
                 "  fills the outside, fixes t-junctions, and writes the portal file.\n"
@@ -57,19 +65,186 @@ namespace tools
                 "  -nofill               don't fill the outside (leak debugging)\n"
                 "  -noinsidefill         don't fill enclosed pockets\n"
                 "  -leakonly             stop after the leak check\n"
-                "  -allleaks             report every hole, not just the first, and
-"
-                "                        put all their paths in one pointfile
-"
+                "  -allleaks             report every hole, not just the first, and\n"
+                "                        put all their paths in one pointfile\n"
                 "\n"
                 "misc\n"
                 "  -nonulltex            don't strip null faces\n"
                 "  -threads <n>          worker threads             (default: all cores)\n");
         }
+
+        void print_pack_help()
+        {
+            logging::console(
+                "usage\n"
+                "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
+                "\n"
+                "  copies the BSP and its external resources below <output-dir>,\n"
+                "  preserving game-relative paths such as maps/, models/, sound/,\n"
+                "  sprites/, and gfx/env/. Also writes maps/<map>.res.\n"
+                "\n"
+                "options\n"
+                "  -game <dir>  source game directory; inferred when the BSP is\n"
+                "               inside a maps directory\n"
+                "  -base <dir>  installed base content to exclude; repeatable\n"
+                "  -force       overwrite files already present in the output\n"
+                "  -strict      fail when any referenced resource cannot be found\n");
+        }
+
+        bool is_help(const char *value)
+        {
+            return str::iequals(value, "-h") || str::iequals(value, "-help")
+                || str::iequals(value, "--help") || str::iequals(value, "help");
+        }
+
+        std::string infer_game_dir(const std::string &bsp_path)
+        {
+            stdfs::path parent = stdfs::absolute(bsp_path).parent_path();
+            if (str::iequals(parent.filename().string().c_str(), "maps"))
+                return parent.parent_path().string();
+            return {};
+        }
+
+        void add_inferred_base_dirs(bsp::pack_options &options)
+        {
+            stdfs::path game = stdfs::absolute(options.game_dir);
+            std::string name = game.filename().string();
+            std::string lowered = name;
+            for (char &c : lowered)
+                c = (char)std::tolower((unsigned char)c);
+            const std::string suffix = "_downloads";
+            std::vector<stdfs::path> candidates;
+            if (lowered.size() > suffix.size()
+                && lowered.substr(lowered.size() - suffix.size()) == suffix)
+            {
+                name.resize(name.size() - suffix.size());
+                candidates.push_back(game.parent_path() / name);
+            }
+            candidates.push_back(game.parent_path() / "valve");
+
+            for (const stdfs::path &base : candidates)
+            {
+                std::error_code ec;
+                if (!stdfs::is_directory(base, ec))
+                    continue;
+                bool duplicate = false;
+                for (const std::string &existing : options.base_dirs)
+                    if (str::iequals(stdfs::absolute(existing).string().c_str(),
+                                     stdfs::absolute(base).string().c_str()))
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                if (!duplicate
+                    && !str::iequals(game.string().c_str(),
+                                     stdfs::absolute(base).string().c_str()))
+                    options.base_dirs.push_back(base.string());
+            }
+        }
+
+        int run_pack(int argc, char **argv)
+        {
+            if (argc >= 3 && is_help(argv[2]))
+            {
+                print_pack_help();
+                return 0;
+            }
+
+            bsp::pack_options options;
+            std::vector<std::string> positional;
+            for (int i = 2; i < argc; i++)
+            {
+                if (str::iequals(argv[i], "-force"))
+                {
+                    options.force = true;
+                    continue;
+                }
+                if (str::iequals(argv[i], "-strict"))
+                {
+                    options.strict = true;
+                    continue;
+                }
+                if (str::iequals(argv[i], "-game"))
+                {
+                    if (++i >= argc)
+                    {
+                        logging::console(
+                            "bsp pack: -game requires a source directory\n");
+                        return 1;
+                    }
+                    options.game_dir = argv[i];
+                    continue;
+                }
+                if (str::iequals(argv[i], "-base"))
+                {
+                    if (++i >= argc)
+                    {
+                        logging::console(
+                            "bsp pack: -base requires a content directory\n");
+                        return 1;
+                    }
+                    options.base_dirs.emplace_back(argv[i]);
+                    continue;
+                }
+                if (argv[i][0] == '-')
+                {
+                    logging::console("bsp pack: unknown option '%s'\n", argv[i]);
+                    return 1;
+                }
+                positional.emplace_back(argv[i]);
+            }
+            if (positional.size() != 2)
+            {
+                print_pack_help();
+                return 1;
+            }
+
+            std::string source = fs::with_extension(positional[0], ".bsp");
+            if (options.game_dir.empty())
+                options.game_dir = infer_game_dir(source);
+            if (options.game_dir.empty())
+            {
+                logging::console(
+                    "bsp pack: could not infer the game directory; use -game\n");
+                return 1;
+            }
+            add_inferred_base_dirs(options);
+
+            bsp::pack_result result;
+            std::string error;
+            bool ok = bsp::pack_map(
+                source, positional[1], options, result, &error);
+            for (const std::string &missing : result.missing)
+                logging::console("warning: missing %s\n", missing.c_str());
+            if (!ok)
+            {
+                logging::console("bsp pack: %s\n", error.c_str());
+                return 1;
+            }
+
+            logging::console(
+                "packed %zu resource(s) to %s (%zu copied, %zu already in place)\n"
+                "wrote %s\n",
+                result.resources.size(), positional[1].c_str(), result.copied,
+                result.unchanged, result.res_path.c_str());
+            if (!result.provided_by_base.empty())
+                logging::console(
+                    "%zu referenced resource(s) are provided by base content\n",
+                    result.provided_by_base.size());
+            if (!result.missing.empty())
+                logging::console(
+                    "%zu referenced resource(s) were not found; use -strict to "
+                    "treat this as an error\n",
+                    result.missing.size());
+            return 0;
+        }
     }
 
     int run_bsp_tool(int argc, char **argv)
     {
+        if (argc >= 2 && str::iequals(argv[1], "pack"))
+            return run_pack(argc, argv);
+
         cli::args args(argc, argv);
         const bool want_help = args.has("-h") || args.has("-help") || args.has("--help");
         if (args.empty() || args.map_name().empty() || want_help)

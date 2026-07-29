@@ -83,6 +83,7 @@ add_hltools_unit(unit_bsp
     PREFIX "unit.bsp."
     SOURCES
         unit/bsp/leaf_content_conflicts.cpp
+        unit/bsp/pack.cpp
         unit/bsp/subdivide_face.cpp
     LIBRARIES hltools_bsp
     LABEL unit.bsp)

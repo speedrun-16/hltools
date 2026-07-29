@@ -157,6 +157,7 @@ add_library(hltools_bsp STATIC
     src/bsp/face.cpp
     src/bsp/inputs.cpp
     src/bsp/merge.cpp
+    src/bsp/pack.cpp
     src/bsp/bsp.cpp
     src/bsp/brink.cpp
     src/bsp/outside.cpp

@@ -37,6 +37,8 @@ namespace
             "\n"
             "map / bsp tools\n"
             "  bspinfo      report a compiled bsp's contents and limits\n"
+            "  bsp pack     collect a BSP's resources and generate its .res file
+"
             "  lightmap     export compiled lightmaps as a 24-bit bmp atlas\n"
             "  ripent       import / export the entity lump                  (planned)\n"
             "  decompile    reconstruct a Valve 220 .map from a .bsp\n"
