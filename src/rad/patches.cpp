@@ -104,8 +104,8 @@ namespace rad
         logging::info("  %-14s %u parsed (%s)\n", "texlights", file_texlights, filename);
     }
 
-    // parse texlights and per texture minlights from the info_texlights and
-    // info_minlights entities
+    // parse texture keyed lighting metadata from info_texlights,
+    // info_minlights, and info_unlittextures entities
     void read_info_tex_and_minlights(rad_state &state)
     {
         int values;
@@ -177,11 +177,39 @@ namespace rad
                 }
                 found_texlights = true;
             }
+            else if (!strcmp(mapent->value("classname"), "info_unlittextures"))
+            {
+                logging::info("Reading unlit textures from info_unlittextures map entity\n");
+
+                for (size_t ep = 0; ep < mapent->pairs().size(); ep++)
+                {
+                    const char *key = mapent->pairs()[ep].first.c_str();
+                    const char *value = mapent->pairs()[ep].second.c_str();
+                    if (!strcmp(key, "classname") || !strcmp(key, "origin"))
+                        continue;
+                    int enabled = 0;
+                    if (sscanf(value, "%d", &enabled) != 1)
+                    {
+                        logging::warn("Ignoring bad unlit flag '%s' in info_unlittextures entity", key);
+                        continue;
+                    }
+                    if (enabled != 0)
+                        state.unlittextures.emplace_back(key);
+                }
+            }
             if (found_minlights && found_texlights)
             {
                 break;
             }
         }
+    }
+
+    bool is_unlit_texture(const rad_state &state, const char *name)
+    {
+        for (const std::string &texture : state.unlittextures)
+            if (str::iequals(name, texture.c_str()))
+                return true;
+        return false;
     }
 
     namespace

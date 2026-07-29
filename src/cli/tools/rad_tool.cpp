@@ -453,6 +453,7 @@ namespace tools
                 "  Each key except classname/origin is a texture name. Its value is:\n"
                 "  info_texlights    <colour>     emitted light (same syntax as lights.rad)\n"
                 "  info_minlights    <0..1>       minimum light on that texture\n"
+                "  info_unlittextures <nonzero>    bake white lightmaps (fullbright texture)\n"
                 "  info_chopscale    <positive>   patch-size multiplier\n"
                 "  info_smoothvalue  <degrees>    smoothing angle for that texture\n"
                 "  info_translucent  <0..1|r g b> front/back light transmission blend\n"

@@ -489,6 +489,9 @@ namespace rad
 
         std::vector<minlight> minlights;
         std::vector<rad_texlight> texlights;
+        // texture names whose faces receive a constant-white lightmap. Source
+        // decompilation uses this to preserve whole-surface unlit shaders.
+        std::vector<std::string> unlittextures;
 
         // per miptex chop scale from info_chopscale
         std::vector<vec_t> chopscales;
@@ -641,6 +644,7 @@ namespace rad
 
     void read_light_file(rad_state &state, const char *filename);
     void read_info_tex_and_minlights(rad_state &state);
+    bool is_unlit_texture(const rad_state &state, const char *name);
     void read_custom_chop_value(rad_state &state);
     void read_custom_smooth_value(rad_state &state);
     void read_translucent_textures(rad_state &state);

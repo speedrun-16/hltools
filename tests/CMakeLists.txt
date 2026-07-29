@@ -101,6 +101,7 @@ add_hltools_unit(unit_rad
     PREFIX "unit.rad."
     SOURCES
         unit/rad/options.cpp
+        unit/rad/unlit_textures.cpp
         ../src/cli/tools/rad_tool.cpp
     LIBRARIES hltools_rad
     LABEL unit.rad)

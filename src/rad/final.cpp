@@ -589,6 +589,26 @@ namespace rad
             {
                 continue; // non lit texture
             }
+            if (is_unlit_texture(state, texture_by_number(state, f->texinfo)))
+            {
+                // An ordinary GoldSrc face with lightofs -1 is not fullbright:
+                // the renderer still takes its regular lightmapped path and the
+                // missing samples appear black. Give unlit materials one
+                // constant-white style-0 lightmap instead. Modulating the base
+                // texture by white reproduces Source's whole-surface unlit
+                // shader while retaining the normal surface render path.
+                f->lightofs = lightdatasize;
+                f->styles[0] = 0;
+                for (int k = 1; k < maxlightmaps; k++)
+                    f->styles[k] = 255;
+                int bytes = fl->numsamples * 3;
+                err::require(lightdatasize + bytes <= state.max_map_lightdata,
+                             "reduce_lightmap: exceeded MAX_MAP_LIGHTING");
+                std::fill_n(map.lighting.begin() + lightdatasize,
+                            (std::size_t)bytes, (byte)255);
+                lightdatasize += bytes;
+                continue;
+            }
             // just need to zero the lightmap so that it does not contribute to
             // the lightdata size
             if (int_for_key(*state.face_entity[(size_t)facenum], "zhlt_striprad"))
