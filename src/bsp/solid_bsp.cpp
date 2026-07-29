@@ -1134,8 +1134,8 @@ namespace bsp
                 return false;
             for (int i = 0; i < 3; i++)
             {
-                vec_t low = (vec_t)-(engine_entity_range + state.options.maxnode_size);
-                vec_t high = (vec_t)(engine_entity_range + state.options.maxnode_size);
+                vec_t low = (vec_t)-(tree_extent + state.options.maxnode_size);
+                vec_t high = (vec_t)(tree_extent + state.options.maxnode_size);
                 validmins[i] = n->mins[i] > low ? n->mins[i] : low;
                 validmaxs[i] = n->maxs[i] < high ? n->maxs[i] : high;
             }

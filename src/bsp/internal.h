@@ -48,6 +48,12 @@ namespace bsp
     constexpr int contents_toempty = -32;
 
     constexpr double engine_entity_range = 4096.0;
+    // half the geometric range csg accepts (its world_extent defaults to 65536).
+    // this is what bounds tree subdivision: it is a different quantity from the
+    // networked entity range above, which only limits where entity origins may
+    // sit, and using that smaller number here left every node beyond +/-4096
+    // unsubdivided on a large map.
+    constexpr double tree_extent = 32768.0;
     constexpr int tex_special = 1; // texinfo flag: no lightmap or subdivision
     constexpr int last_axial = 2;  // plane types x/y/z are axial
 
