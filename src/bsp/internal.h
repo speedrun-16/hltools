@@ -230,6 +230,10 @@ namespace bsp
         bool clipnode_limit_exceeded = false;
         std::size_t clipnodes_per_hull[num_hulls] = {};
 
+        // sliver faces that could not be subdivided under the lightmap extent
+        // limit and were dropped rather than fail hlrad
+        std::size_t unsplittable_faces = 0;
+
         // entity lookup for warnings (parsed once by the driver)
         std::vector<format::entity> entities;
 

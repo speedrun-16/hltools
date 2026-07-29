@@ -331,18 +331,31 @@ namespace bsp
                 face *front;
                 face *back;
                 split_face(state, f, &split, &front, &back);
-                f = next;
-                if (front)
+                // the plane did not divide the polygon: every point landed on
+                // one side, or a half collapsed in split_face's colinear point
+                // cleanup. in practice this only happens to long thin slivers,
+                // whose fragments both degenerate away. split_face only frees
+                // the original when it hands back both halves, so f is still
+                // valid and still linked here.
+                //
+                // such a face cannot be made to fit a lightmap: control only
+                // reaches here when the extent is already past subdivide_size,
+                // and hlrad counts luxels over the grid (ceil(max/16) -
+                // floor(min/16)), so even an extent equal to the limit can
+                // straddle one cell too many. left in, it reaches hlrad with
+                // extents past max_surface_extent and kills the compile with
+                // "Bad surface extents". its area is negligible, so drop it;
+                // copy_faces_to_node skips discardable faces.
+                if (!front || !back)
                 {
-                    front->next = f;
-                    f = front;
+                    f->style = face_style::discardable;
+                    state.unsplittable_faces++;
+                    break;
                 }
-                if (back)
-                {
-                    back->next = f;
-                    f = back;
-                }
-                *prevptr = f;
+                front->next = next;
+                back->next = front;
+                *prevptr = back;
+                f = back;
             }
         }
     }

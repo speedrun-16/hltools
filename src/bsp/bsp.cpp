@@ -258,6 +258,11 @@ namespace bsp
             // one consolidated leaf content report after every model and hull
             print_leaf_content_conflicts(state);
 
+            if (state.unsplittable_faces != 0)
+                logging::warn("dropped %zu sliver faces that could not be subdivided "
+                              "under the lightmap extent limit",
+                              state.unsplittable_faces);
+
             // one consolidated leak block (if any hull leaked), before the chart
             print_leak_summary();
 
