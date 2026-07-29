@@ -106,6 +106,7 @@ add_library(hltools_format STATIC
     src/format/rad/texlights.cpp
     src/format/vmt/vmt.cpp
     src/format/vpk/vpk.cpp
+    src/format/vtf/vtf.cpp
     src/format/wad/archive.cpp
 )
 target_include_directories(hltools_format PUBLIC src)
