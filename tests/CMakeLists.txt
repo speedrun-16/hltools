@@ -69,8 +69,10 @@ add_hltools_unit(unit_format
     PREFIX "unit.format."
     SOURCES
         unit/format/entity_lump.cpp
+        unit/format/goldsrc_mdl.cpp
         unit/format/quantize.cpp
         unit/format/rad_file.cpp
+        unit/format/source_mdl.cpp
     LIBRARIES hltools_format
     LABEL unit.format)
 

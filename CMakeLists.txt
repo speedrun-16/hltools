@@ -102,6 +102,8 @@ add_library(hltools_format STATIC
     src/format/bsp/usage_chart.cpp
     src/format/image/quantize.cpp
     src/format/map/document.cpp
+    src/format/mdl/goldsrc_mdl.cpp
+    src/format/mdl/source_mdl.cpp
     src/format/miptex/texture.cpp
     src/format/rad/texlights.cpp
     src/format/vbsp/file.cpp
