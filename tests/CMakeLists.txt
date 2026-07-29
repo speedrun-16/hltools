@@ -79,6 +79,7 @@ add_hltools_unit(unit_format
 add_hltools_unit(unit_decompile
     PREFIX "unit.decompile."
     SOURCES
+        unit/decompile/source_entities.cpp
         unit/decompile/source_materials.cpp
     LIBRARIES hltools_decompile
     LABEL unit.decompile)
