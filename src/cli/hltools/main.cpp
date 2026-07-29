@@ -12,6 +12,7 @@
 #include "../tools/lightmap_tool.h"
 #include "../tools/wad_tool.h"
 #include "../tools/decompile_tool.h"
+#include "../tools/model_tool.h"
 #include "compile.h"
 
 // hltools: single binary goldsrc toolkit dispatches to subcommands; the
@@ -37,15 +38,15 @@ namespace
             "\n"
             "map / bsp tools\n"
             "  bspinfo      report a compiled bsp's contents and limits\n"
-            "  bsp pack     collect a BSP's resources and generate its .res file
-"
+            "  bsp pack     collect a BSP's resources and generate its .res file\n"
             "  lightmap     export compiled lightmaps as a 24-bit bmp atlas\n"
             "  ripent       import / export the entity lump                  (planned)\n"
             "  decompile    reconstruct a Valve 220 .map from a .bsp\n"
             "\n"
             "assets\n"
             "  wad          list / extract / build wad texture archives\n"
-            "  model        compile / decompile studio models (.mdl)         (planned)\n"
+            "  model        convert Source models and build skybox models;\n"
+            "               GoldSrc model compile/decompile is planned\n"
             "\n"
             "common options\n"
             "  -threads <n>   worker threads                       (default: all cores)\n"
@@ -100,9 +101,10 @@ int main(int argc, char **argv)
         return tools::run_wad_tool(sub_argc, sub_argv.data());
     if (str::iequals(command, "decompile"))
         return tools::run_decompile_tool(sub_argc, sub_argv.data());
+    if (str::iequals(command, "model"))
+        return tools::run_model_tool(sub_argc, sub_argv.data());
 
-    if (str::iequals(command, "ripent")
-        || str::iequals(command, "model"))
+    if (str::iequals(command, "ripent"))
     {
         logging::console("hltools %s: planned, not available yet\n", command);
         return 1;

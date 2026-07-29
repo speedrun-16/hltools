@@ -335,8 +335,10 @@ add_executable(hltools
     src/cli/tools/lightmap_tool.cpp
     src/cli/tools/wad_tool.cpp
     src/cli/tools/decompile_tool.cpp
+    src/cli/tools/model_tool.cpp
 )
-target_link_libraries(hltools PRIVATE hltools_csg hltools_bsp hltools_vis hltools_rad hltools_decompile)
+target_link_libraries(hltools PRIVATE hltools_csg hltools_bsp hltools_vis hltools_rad
+    hltools_decompile hltools_model)
 set_target_properties(hltools PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
 if(BUILD_TESTING)
