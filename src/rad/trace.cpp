@@ -423,6 +423,10 @@ namespace rad
         int merge_opaque_faces(rad_state &state, int firstface, int numfaces)
         {
             int i, j, newnum;
+            // a node with no faces may carry firstface == faces.size() (a legal
+            // one-past-the-end empty range); indexing it would assert
+            if (numfaces <= 0)
+                return 0;
             opaque_face *faces = &state.opaquefaces[(size_t)firstface];
             for (i = 0; i < numfaces; i++)
             {
