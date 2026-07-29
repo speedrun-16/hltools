@@ -76,6 +76,13 @@ add_hltools_unit(unit_format
     LIBRARIES hltools_format
     LABEL unit.format)
 
+add_hltools_unit(unit_decompile
+    PREFIX "unit.decompile."
+    SOURCES
+        unit/decompile/source_materials.cpp
+    LIBRARIES hltools_decompile
+    LABEL unit.decompile)
+
 add_hltools_unit(unit_model
     PREFIX "unit.model."
     SOURCES
