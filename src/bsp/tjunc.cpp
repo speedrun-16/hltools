@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <deque>
+#include <new>
 
 #include "../common/error.h"
 
@@ -13,8 +15,6 @@ namespace bsp
 {
     namespace
     {
-        constexpr int max_wverts = 0x40000;
-        constexpr int max_wedges = 0x20000;
         constexpr int num_hash = 4096;
         constexpr int max_hash_neighbors = 4;
         constexpr double t_epsilon = math::on_epsilon;
@@ -35,6 +35,7 @@ namespace bsp
             math::vec3v dir;
             math::vec3v origin;
             wvert head;
+            int numverts = 0;
         };
 
         // a face with room for every tjunc inserted point
@@ -52,12 +53,19 @@ namespace bsp
 
         struct tjunc_state
         {
-            std::vector<wvert> wverts = std::vector<wvert>(max_wverts);
-            std::vector<wedge> wedges = std::vector<wedge>(max_wedges);
+            // Intrusive edge lists store direct pointers into these pools.
+            // deque keeps them stable while allowing the temporary workspace
+            // to grow with the input instead of enforcing legacy array caps.
+            std::deque<wvert> wverts;
+            std::deque<wedge> wedges;
+            bsp_state *state = nullptr;
             int numwedges = 0;
             int numwverts = 0;
+            int input_faces = 0;
+            int input_edges = 0;
             int tjuncs = 0;
             int tjuncfaces = 0;
+            wedge *densest_wedge = nullptr;
 
             wedge *wedge_hash[num_hash] = {};
             math::vec3v hash_min;
@@ -69,6 +77,54 @@ namespace bsp
         };
 
         tjunc_state g_tjunc;
+
+        math::vec3v point_on_wedge(const wedge *w, vec_t t)
+        {
+            math::vec3v point;
+            math::multiply_add(w->origin, t, w->dir, point);
+            return point;
+        }
+
+        [[noreturn]] void fatal_wvert_allocation(const wedge *w, vec_t t)
+        {
+            int model = g_tjunc.state ? g_tjunc.state->nummodels - 1 : -1;
+            const format::entity *ent =
+                g_tjunc.state ? entity_for_model(*g_tjunc.state, model) : nullptr;
+            math::vec3v point = point_on_wedge(w, t);
+
+            math::vec3v dense_start = {};
+            math::vec3v dense_end = {};
+            int dense_verts = 0;
+            if (g_tjunc.densest_wedge)
+            {
+                const wedge *dense = g_tjunc.densest_wedge;
+                dense_verts = dense->numverts;
+                dense_start = point_on_wedge(dense, dense->head.next->t);
+                dense_end = point_on_wedge(dense, dense->head.prev->t);
+            }
+
+            err::fatal(
+                "could not grow T-junction vertex workspace\n"
+                "  model              %d (%s; origin \"%s\"; targetname \"%s\")\n"
+                "  temporary vertices %d\n"
+                "  edge lines         %d\n"
+                "  scanned geometry   %d faces, %d edges\n"
+                "  attempted vertex   (%.3f %.3f %.3f), line currently has %d vertices\n"
+                "  densest edge line  %d vertices, (%.3f %.3f %.3f) to (%.3f %.3f %.3f)\n"
+                "  note               system memory allocation failed; this is not a BSP limit\n"
+                "  action             simplify highly intersecting or fragmented brushwork",
+                model,
+                ent ? ent->value("classname") : "unknown entity",
+                ent ? ent->value("origin") : "",
+                ent ? ent->value("targetname") : "",
+                g_tjunc.numwverts,
+                g_tjunc.numwedges,
+                g_tjunc.input_faces, g_tjunc.input_edges,
+                (double)point[0], (double)point[1], (double)point[2], w->numverts,
+                dense_verts,
+                (double)dense_start[0], (double)dense_start[1], (double)dense_start[2],
+                (double)dense_end[0], (double)dense_end[1], (double)dense_end[2]);
+        }
 
         void init_hash()
         {
@@ -220,9 +276,16 @@ namespace bsp
                 }
             }
 
-            if (g_tjunc.numwedges >= max_wedges)
-                err::fatal("exceeded max_wedges");
-            wedge *w = &g_tjunc.wedges[(size_t)g_tjunc.numwedges];
+            try
+            {
+                g_tjunc.wedges.emplace_back();
+            }
+            catch (const std::bad_alloc &)
+            {
+                err::fatal("could not grow T-junction edge workspace after %d edge lines",
+                           g_tjunc.numwedges);
+            }
+            wedge *w = &g_tjunc.wedges.back();
             g_tjunc.numwedges++;
 
             w->next = g_tjunc.wedge_hash[h];
@@ -232,10 +295,11 @@ namespace bsp
             w->dir = dir;
             w->head.next = w->head.prev = &w->head;
             w->head.t = 99999;
+            w->numverts = 0;
             return w;
         }
 
-        void add_vert(const wedge *w, vec_t t)
+        void add_vert(wedge *w, vec_t t)
         {
             wvert *v = w->head.next;
             while (true)
@@ -248,9 +312,15 @@ namespace bsp
             }
 
             // insert a new wvert before v
-            if (g_tjunc.numwverts >= max_wverts)
-                err::fatal("exceeded max_wverts");
-            wvert *newv = &g_tjunc.wverts[(size_t)g_tjunc.numwverts];
+            try
+            {
+                g_tjunc.wverts.emplace_back();
+            }
+            catch (const std::bad_alloc &)
+            {
+                fatal_wvert_allocation(w, t);
+            }
+            wvert *newv = &g_tjunc.wverts.back();
             g_tjunc.numwverts++;
 
             newv->t = t;
@@ -258,6 +328,12 @@ namespace bsp
             newv->prev = v->prev;
             v->prev->next = newv;
             v->prev = newv;
+            w->numverts++;
+            if (!g_tjunc.densest_wedge
+                || w->numverts > g_tjunc.densest_wedge->numverts)
+            {
+                g_tjunc.densest_wedge = w;
+            }
         }
 
         void add_edge(const math::vec3v &p1, const math::vec3v &p2)
@@ -270,6 +346,8 @@ namespace bsp
 
         void add_face_edges(const face *f)
         {
+            g_tjunc.input_faces++;
+            g_tjunc.input_edges += f->numpoints;
             for (int i = 0; i < f->numpoints; i++)
             {
                 int j = (i + 1) % f->numpoints;
@@ -478,7 +556,12 @@ namespace bsp
         // identify all points on common edges
         init_hash();
 
+        g_tjunc.state = &state;
+        g_tjunc.wedges.clear();
+        g_tjunc.wverts.clear();
         g_tjunc.numwedges = g_tjunc.numwverts = 0;
+        g_tjunc.input_faces = g_tjunc.input_edges = 0;
+        g_tjunc.densest_wedge = nullptr;
 
         tjunc_find_r(headnode);
 
