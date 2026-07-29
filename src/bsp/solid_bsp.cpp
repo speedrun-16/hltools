@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "../common/error.h"
 #include "../common/log.h"
@@ -926,7 +927,12 @@ namespace bsp
             leaf->detailbrushes = nullptr;
         }
 
-        constexpr int max_leaf_faces = 16384;
+        // the engine keeps a leaf's mark surface count in an unsigned short, so
+        // that is the real ceiling. the working buffer used to be a fixed 128kb
+        // stack frame, which capped leaves far below what the format allows and
+        // rejected heavily detailed maps; it is now grown on demand and reused
+        // across leaves, so the allocation cost is paid once.
+        constexpr int max_leaf_faces = 65535;
 
         void make_leaf(node *leafnode)
         {
@@ -941,10 +947,9 @@ namespace bsp
 
             if (!(leafnode->isportalleaf && leafnode->contents == contents_solid))
             {
-                // one transient 128kb frame, exactly like the reference's
-                // stack array; make_leaf never recurses
-                face *markfaces[max_leaf_faces + 1];
-                int nummarkfaces = 0;
+                // reused across leaves; make_leaf never recurses
+                static thread_local std::vector<face *> markfaces;
+                markfaces.clear();
                 for (surface *surf = leafnode->surfaces; surf; surf = surf->next)
                 {
                     if (!surf->onnode)
@@ -953,17 +958,27 @@ namespace bsp
                     {
                         if (f->original == nullptr)
                             continue; // not on node or content is solid
-                        if (nummarkfaces >= max_leaf_faces)
-                            err::fatal("exceeded max_leaf_faces");
-                        markfaces[nummarkfaces++] = f->original;
+                        if ((int)markfaces.size() >= max_leaf_faces)
+                            err::fatal("exceeded max_leaf_faces\n"
+                                       "    leaf bounds (%.0f %.0f %.0f)-(%.0f %.0f %.0f)"
+                                       " detail=%d portalleaf=%d contents=%d",
+                                       (double)leafnode->loosemins.x,
+                                       (double)leafnode->loosemins.y,
+                                       (double)leafnode->loosemins.z,
+                                       (double)leafnode->loosemaxs.x,
+                                       (double)leafnode->loosemaxs.y,
+                                       (double)leafnode->loosemaxs.z,
+                                       (int)leafnode->isdetail,
+                                       (int)leafnode->isportalleaf,
+                                       leafnode->contents);
+                        markfaces.push_back(f->original);
                     }
                 }
-                markfaces[nummarkfaces] = nullptr; // end marker
-                nummarkfaces++;
+                markfaces.push_back(nullptr); // end marker
 
-                leafnode->markfaces = new face *[(size_t)nummarkfaces];
-                std::memcpy(leafnode->markfaces, markfaces,
-                            (size_t)nummarkfaces * sizeof(*leafnode->markfaces));
+                leafnode->markfaces = new face *[markfaces.size()];
+                std::memcpy(leafnode->markfaces, markfaces.data(),
+                            markfaces.size() * sizeof(*leafnode->markfaces));
             }
 
             free_leaf_surfs(leafnode);
