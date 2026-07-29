@@ -19,6 +19,7 @@
 #ifdef HLTOOLS_GPU_ENABLED
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -51,7 +52,26 @@ namespace rad
 
     namespace
     {
-        constexpr size_t gather_chunk_items = 65536; // keeps each dispatch well under tdr
+        // the upper clamp, and the size the resident chunk buffers are cut to;
+        // the dispatch loop steers the live chunk somewhere below this
+        constexpr size_t gather_chunk_items = 65536;
+
+        // a work item's cost scales with the number of emitters the kernel
+        // walks for it, so a fixed item count says nothing about how long a
+        // dispatch runs: a map carrying 16k texlight emitters spent ~18s in
+        // one, against the ~2s windows gives a submit before it resets the
+        // device (tdr) and we lose the whole gather to the cpu fallback.
+        // measure each dispatch and steer the next one at a target instead
+        // the target is deliberately far under the ~2s reset window: a chunk's
+        // cost swings with how many emitters its faces actually see, so the
+        // spread around the average is wide and only the peak matters. an
+        // extra dispatch costs microseconds of submit overhead, while one
+        // overshoot loses the whole gather to the cpu, so we buy the margin
+        constexpr double gather_target_seconds = 0.20;
+        // a dispatch slower than this ratchets the ceiling down for good
+        constexpr double gather_ceiling_seconds = 0.40;
+        constexpr size_t gather_chunk_min = 256;
+        constexpr size_t gather_chunk_start = 2048;
 
         // mirrors texlightgap_setup in gather_sample_light
         void face_gap_vectors(const rad_state &state, int facenum, float *out6)
@@ -525,21 +545,44 @@ namespace rad
         std::vector<gpu::near_pair> near_pairs;
         progress::section("lighting");
         progress::begin("gathering light on the gpu", (int)d->items.size());
-        for (size_t base = 0; base < d->items.size(); base += gather_chunk_items)
+        size_t chunk = d->items.size() < gather_chunk_start
+            ? d->items.size() : gather_chunk_start;
+        size_t chunk_lo = chunk;
+        size_t chunk_hi = chunk;
+        size_t chunk_ceiling = gather_chunk_items;
+        size_t dispatches = 0;
+        double spent = 0.0;
+        double slowest = 0.0;
+        for (size_t base = 0; base < d->items.size();)
         {
-            const size_t count = d->items.size() - base < gather_chunk_items
-                ? d->items.size() - base : gather_chunk_items;
+            const size_t count = d->items.size() - base < chunk
+                ? d->items.size() - base : chunk;
             std::vector<gpu::gather_result_gpu> chunk_results;
             std::vector<gpu::near_pair> chunk_near;
-            if (!gpu::gather_batch(&d->items[base], count, chunk_results, chunk_near))
+            const auto started = std::chrono::steady_clock::now();
+            const bool ok = gpu::gather_batch(&d->items[base], count, chunk_results, chunk_near);
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started).count();
+            if (!ok)
             {
                 progress::end();
+                // say what the dispatch that died actually looked like, so a
+                // fallback can be told apart from a chunk that ran too long
+                logging::file("gpu lighting: gather failed on dispatch %zu at item"
+                              " %zu/%zu (chunk %zu items, %.3fs; %zu dispatches ok,"
+                              " %.3fs total, %.3fs slowest)\n",
+                              dispatches + 1, base, d->items.size(), count, elapsed,
+                              dispatches, spent, slowest);
                 gpu::gather_end();
                 logging::warn("-gpu: %s; using the cpu path", gpu::last_error().c_str());
                 state.gpu_gather_phase = 0;
                 gpu_gather_finish(state);
                 return false;
             }
+            dispatches++;
+            spent += elapsed;
+            if (elapsed > slowest)
+                slowest = elapsed;
             std::memcpy(&d->results[base], chunk_results.data(),
                         chunk_results.size() * sizeof(gpu::gather_result_gpu));
             for (gpu::near_pair pair : chunk_near)
@@ -547,9 +590,49 @@ namespace rad
                 pair.item += (uint32_t)base;
                 near_pairs.push_back(pair);
             }
+            base += count;
             progress::add((int)count);
+
+            // any dispatch that ran long ratchets the ceiling down and it
+            // never rises again: the average says little here, so the run
+            // has to be paced by the worst chunk seen rather than the last
+            if (elapsed > gather_ceiling_seconds)
+            {
+                const double scaled = (double)count * (gather_ceiling_seconds / elapsed);
+                const size_t capped = scaled < (double)gather_chunk_min
+                    ? gather_chunk_min : (size_t)scaled;
+                if (capped < chunk_ceiling)
+                    chunk_ceiling = capped;
+            }
+
+            // steer the next chunk at the target. growth is capped at 1.5x a
+            // step so the size creeps up to the ceiling instead of jumping
+            // there, while a slow dispatch shrinks it proportionally at once
+            if (elapsed > 1e-6)
+            {
+                double factor = gather_target_seconds / elapsed;
+                if (factor > 1.5)
+                    factor = 1.5;
+                else if (factor < 0.25)
+                    factor = 0.25;
+                const double next = (double)count * factor;
+                const size_t ceiling = chunk_ceiling < gather_chunk_items
+                    ? chunk_ceiling : gather_chunk_items;
+                chunk = next < (double)gather_chunk_min
+                    ? gather_chunk_min
+                    : (next > (double)ceiling ? ceiling : (size_t)next);
+                if (chunk < chunk_lo)
+                    chunk_lo = chunk;
+                if (chunk > chunk_hi)
+                    chunk_hi = chunk;
+            }
         }
         progress::end();
+        logging::file("gpu lighting: gather chunk steered over %zu..%zu items"
+                      " (target %.2fs a dispatch, ceiling %zu); %zu dispatches,"
+                      " %.3fs total, %.3fs slowest\n",
+                      chunk_lo, chunk_hi, gather_target_seconds, chunk_ceiling,
+                      dispatches, spent, slowest);
         gpu::gather_end();
 
         // resolve the surface near branch pairs with the reference code, in
