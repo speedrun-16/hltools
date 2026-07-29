@@ -42,6 +42,12 @@ namespace format
             pairs_.emplace(pairs_.begin(), std::move(key), std::move(value));
         }
 
+        // generator hook: add a pair at the tail, for code that builds entities
+        // top-down and wants the written order to match the call order
+        void append(std::string key, std::string value) {
+            pairs_.emplace_back(std::move(key), std::move(value));
+        }
+
     private:
         std::vector<pair> pairs_;
     };

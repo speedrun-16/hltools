@@ -104,6 +104,8 @@ add_library(hltools_format STATIC
     src/format/map/document.cpp
     src/format/miptex/texture.cpp
     src/format/rad/texlights.cpp
+    src/format/vbsp/file.cpp
+    src/format/vbsp/pakfile.cpp
     src/format/vmt/vmt.cpp
     src/format/vpk/vpk.cpp
     src/format/vtf/vtf.cpp
