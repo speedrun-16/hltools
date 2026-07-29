@@ -173,6 +173,9 @@ namespace bsp
                         write_clip_nodes(state, nodes);
                     }
                 }
+                // reported once all three hulls are counted, so the message can
+                // show where the budget actually went
+                fail_if_clipnode_limit_exceeded(state);
             }
 
             {

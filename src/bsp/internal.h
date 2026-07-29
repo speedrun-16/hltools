@@ -217,6 +217,19 @@ namespace bsp
         int nummodels = 0; // models emitted so far, for warnings
         bool leaked = false;
 
+        // Vertex emission keeps counting after the 16-bit disk limit is
+        // crossed. The draw writer then reports the complete projected count
+        // for the current model instead of stopping at vertex 65536.
+        bool vertex_limit_exceeded = false;
+        std::size_t vertex_model_start = 0;
+        math::vec3v first_excess_vertex;
+
+        // Clipnode emission likewise keeps counting past the 16-bit lump limit
+        // so the report can name the full projected total and the per hull
+        // split, instead of stopping at the first clipnode over the line.
+        bool clipnode_limit_exceeded = false;
+        std::size_t clipnodes_per_hull[num_hulls] = {};
+
         // entity lookup for warnings (parsed once by the driver)
         std::vector<format::entity> entities;
 
@@ -289,6 +302,8 @@ namespace bsp
     void subdivide_face(bsp_state &state, face *f, face **prevptr);
     void make_face_edges(bsp_state &state);
     int get_edge(bsp_state &state, const math::vec3v &p1, const math::vec3v &p2, face *f);
+    void fail_if_vertex_limit_exceeded(const bsp_state &state);
+    void fail_if_clipnode_limit_exceeded(const bsp_state &state);
 
     // write_bspcpp
     void begin_bsp_file(bsp_state &state);

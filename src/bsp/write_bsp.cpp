@@ -127,8 +127,12 @@ namespace bsp
             clipnode_map::iterator output = outputmap->find(make_key(cn));
             if (state.options.noclipnodemerge || output == outputmap->end())
             {
+                // keep emitting past the limit so the failure report can give
+                // the full projected total; the run is aborted before the
+                // lump is written, so the truncated 16 bit children never
+                // reach a file
                 if (c >= limits::max_map_clipnodes)
-                    err::fatal("exceeded max_map_clipnodes");
+                    state.clipnode_limit_exceeded = true;
                 state.map->clipnodes[(size_t)c] = cn;
                 (*outputmap)[make_key(cn)] = c;
             }
@@ -567,7 +571,40 @@ namespace bsp
     {
         // only merge among the clipnodes of the same hull of the same model
         clipnode_map outputmap;
+        const std::size_t before = state.map->clipnodes.size();
         write_clip_nodes_r(state, nodes, nullptr, &outputmap);
+        if (state.hullnum >= 0 && state.hullnum < num_hulls)
+            state.clipnodes_per_hull[state.hullnum] +=
+                state.map->clipnodes.size() - before;
+    }
+
+    // the clipnode lump indexes children as signed 16 bit, so the ceiling is
+    // hard. clipnodes come from the collision hulls, which are driven by brush
+    // geometry alone: no texture or lightmap setting moves this number, and
+    // the only levers are fewer/simpler solid brushes, dropping a hull, or
+    // letting larger nodes go unsplit.
+    void fail_if_clipnode_limit_exceeded(const bsp_state &state)
+    {
+        if (!state.clipnode_limit_exceeded)
+            return;
+
+        const std::size_t projected = state.map->clipnodes.size();
+        const std::size_t over = projected > (std::size_t)limits::max_map_clipnodes
+                                     ? projected - (std::size_t)limits::max_map_clipnodes
+                                     : 0;
+        err::fatal(
+            "exceeded max_map_clipnodes\n"
+            "  projected clipnodes %zu / %d\n"
+            "  exceeds limit by    %zu (%.2f%% over budget)\n"
+            "  per hull            hull1 %zu, hull2 %zu, hull3 %zu\n"
+            "  note                collision hull size is set by brush geometry; "
+            "texture size and lightmap options do not affect it\n"
+            "  action              simplify solid brushwork, or -nohull2 to drop "
+            "the large monster hull (hull2 above), or raise -maxnodesize",
+            projected, limits::max_map_clipnodes,
+            over, (double)over * 100.0 / (double)limits::max_map_clipnodes,
+            state.clipnodes_per_hull[1], state.clipnodes_per_hull[2],
+            state.clipnodes_per_hull[3]);
     }
 
     void write_draw_nodes(bsp_state &state, node *headnode)
@@ -578,6 +615,7 @@ namespace bsp
         int nextdetaillevel;
         for (int detaillevel = 0; detaillevel != -1; detaillevel = nextdetaillevel)
             nextdetaillevel = output_edges_r(state, headnode, detaillevel);
+        fail_if_vertex_limit_exceeded(state);
         write_draw_nodes_r(state, headnode, nullptr);
     }
 

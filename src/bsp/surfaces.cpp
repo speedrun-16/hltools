@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <deque>
 
 #include "../common/error.h"
 #include "../common/limits.h"
@@ -30,8 +31,9 @@ namespace bsp
 
         struct edge_hash_state
         {
-            std::vector<hashvert> hvertex = std::vector<hashvert>(limits::max_map_verts);
-            hashvert *hvert_p = nullptr;
+            // A deque keeps hashvert addresses stable while diagnostic counting
+            // continues beyond GoldSrc's 16-bit vertex limit.
+            std::deque<hashvert> hvertex;
             hashvert *hashverts[num_hash] = {};
             math::vec3v hash_min;
             math::vec3v hash_scale;
@@ -47,6 +49,7 @@ namespace bsp
         void init_hash()
         {
             std::memset(g_hash.hashverts, 0, sizeof(g_hash.hashverts));
+            g_hash.hvertex.clear();
 
             math::vec3v size;
             for (int i = 0; i < 3; i++)
@@ -69,7 +72,6 @@ namespace bsp
             g_hash.hash_scale[0] = g_hash.hash_numslots[0] / size[0];
             g_hash.hash_scale[1] = g_hash.hash_numslots[1] / size[1];
 
-            g_hash.hvert_p = g_hash.hvertex.data();
         }
 
         // returns the bucket a new vertex writes into; hashneighbors are the
@@ -158,7 +160,17 @@ namespace bsp
                 }
             }
 
-            hashvert *hv = g_hash.hvert_p;
+            if ((int)state.map->vertexes.size() >= limits::max_map_verts)
+            {
+                if (!state.vertex_limit_exceeded)
+                {
+                    state.vertex_limit_exceeded = true;
+                    state.first_excess_vertex = vert;
+                }
+            }
+
+            g_hash.hvertex.emplace_back();
+            hashvert *hv = &g_hash.hvertex.back();
             hv->numedges = 1;
             hv->numplanes = 1;
             hv->planenums[0] = planenum;
@@ -166,9 +178,6 @@ namespace bsp
             g_hash.hashverts[h] = hv;
             hv->point = vert;
             hv->num = (int)state.map->vertexes.size();
-            if (hv->num >= limits::max_map_verts)
-                err::fatal("exceeded max_map_verts");
-            g_hash.hvert_p++;
 
             // emit a vertex
             format::dvertex_t dv;
@@ -186,6 +195,12 @@ namespace bsp
     {
         int v1 = get_vertex(state, p1, f->planenum);
         int v2 = get_vertex(state, p2, f->planenum);
+
+        // Once an index no longer fits in dedge_t, edge output is unusable.
+        // Vertex hashing remains valid, so keep visiting every face to obtain
+        // the exact projected vertex total and fail after the pass.
+        if (state.vertex_limit_exceeded)
+            return 0;
 
         int i;
         for (i = g_hash.firstmodeledge; i < (int)state.map->edges.size(); i++)
@@ -216,7 +231,52 @@ namespace bsp
     void make_face_edges(bsp_state &state)
     {
         init_hash();
+        state.vertex_limit_exceeded = false;
+        state.vertex_model_start = state.map->vertexes.size();
+        state.first_excess_vertex = {};
         g_hash.firstmodeledge = (int)state.map->edges.size();
+    }
+
+    void fail_if_vertex_limit_exceeded(const bsp_state &state)
+    {
+        if (!state.vertex_limit_exceeded)
+            return;
+
+        const std::size_t projected = state.map->vertexes.size();
+        const std::size_t over =
+            projected > (std::size_t)limits::max_map_verts
+                ? projected - (std::size_t)limits::max_map_verts
+                : 0;
+        const double over_budget =
+            (double)over * 100.0 / (double)limits::max_map_verts;
+        const double reduction =
+            projected != 0 ? (double)over * 100.0 / (double)projected : 0.0;
+        const int model = state.nummodels - 1;
+        const format::entity *ent = entity_for_model(state, model);
+
+        err::fatal(
+            "BSP vertex limit exceeded\n"
+            "  model              %d (%s; origin \"%s\"; targetname \"%s\")\n"
+            "  projected vertices %zu / %d\n"
+            "  exceeds limit by   %zu vertices (%.2f%% over budget)\n"
+            "  reduction needed   at least %zu unique vertices (%.2f%% of projected)\n"
+            "  model contribution %zu unique vertices\n"
+            "  first excess at    (%.3f %.3f %.3f)\n"
+            "  note               this is a hard GoldSrc BSP limit; edge vertex "
+            "indices are 16 bit\n"
+            "  action             simplify or repartition fragmented brushwork, then "
+            "compare the projected total",
+            model,
+            ent ? ent->value("classname") : "unknown entity",
+            ent ? ent->value("origin") : "",
+            ent ? ent->value("targetname") : "",
+            projected, limits::max_map_verts,
+            over, over_budget,
+            over, reduction,
+            projected - state.vertex_model_start,
+            (double)state.first_excess_vertex[0],
+            (double)state.first_excess_vertex[1],
+            (double)state.first_excess_vertex[2]);
     }
 
     // if the face is larger than the surface cache in either texture
