@@ -39,6 +39,8 @@ suite("unit.csg.map_parser")
         expect(std::strcmp(map.entities[0].value("targetname"), "") == 0);
         expect(std::strcmp(map.entities[0].value("compiler"),
                            build_info::compiler().c_str()) == 0);
+        expect(std::strcmp(map.entities[0].value("compiled_at"),
+                           build_info::compiled_at().c_str()) == 0);
         expect(map.brushes[0].bevel);
         expect(map.brushes[0].cliphull != 0);
         expect(map.brushes[0].detail_level == 0);

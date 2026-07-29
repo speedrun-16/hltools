@@ -9,4 +9,5 @@ namespace build_info
     const std::string &date();
     const std::string &compiler();
     std::string compiler(const char *scope);
+    const std::string &compiled_at();
 }

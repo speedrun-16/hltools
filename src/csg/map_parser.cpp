@@ -420,7 +420,10 @@ namespace csg
                 current.origin = math::vec3v{ (vec_t)x, (vec_t)y, (vec_t)z };
             }
             if (map.parsed_entities == 0)
+            {
                 current.set_value("compiler", build_info::compiler().c_str());
+                current.set_value("compiled_at", build_info::compiled_at().c_str());
+            }
             map.parsed_entities++;
             return true;
         }

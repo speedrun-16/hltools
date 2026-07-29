@@ -12,4 +12,16 @@ suite("unit.common.build_info")
         expect(build_info::compiler("rad") == std::string("hltools ")
             + build_info::version() + " - rad " + suffix);
     }
+
+    test("build_info.formats the compile instant as UTC ISO 8601")
+    {
+        const std::string &value = build_info::compiled_at();
+        require(value.size() == 20);
+        expect(value[4] == '-');
+        expect(value[7] == '-');
+        expect(value[10] == 'T');
+        expect(value[13] == ':');
+        expect(value[16] == ':');
+        expect(value[19] == 'Z');
+    }
 }
