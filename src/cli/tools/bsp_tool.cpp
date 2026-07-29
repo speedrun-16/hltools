@@ -23,6 +23,7 @@ namespace tools
         options.noopt = args.has("-noopt");
         options.noclipnodemerge = args.has("-noclipnodemerge");
         options.leakonly = args.has("-leakonly");
+        options.allleaks = args.has("-allleaks");
         options.nulltex = !args.has("-nonulltex");
         options.nohull2 = args.has("-nohull2");
         options.maxnode_size = args.int_value("-maxnodesize", options.maxnode_size);
@@ -56,6 +57,10 @@ namespace tools
                 "  -nofill               don't fill the outside (leak debugging)\n"
                 "  -noinsidefill         don't fill enclosed pockets\n"
                 "  -leakonly             stop after the leak check\n"
+                "  -allleaks             report every hole, not just the first, and
+"
+                "                        put all their paths in one pointfile
+"
                 "\n"
                 "misc\n"
                 "  -nonulltex            don't strip null faces\n"

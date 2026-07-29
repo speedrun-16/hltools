@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +20,16 @@ namespace bsp
 {
     namespace
     {
+        // one surveyed hole: the entity that could see out, and where the path
+        // it takes pierces the shell
+        struct leak_site
+        {
+            std::string classname;
+            math::vec3v origin;
+            math::vec3v hole;
+            bool hashole = false;
+        };
+
         struct fill_state
         {
             int outleafs = 0;
@@ -41,6 +52,13 @@ namespace bsp
             math::vec3v leak_entorigin;
             math::vec3v leak_hole;
             bool leak_hashole = false;
+
+            // -allleaks survey: one entry per distinct hole
+            std::vector<leak_site> sites;
+            // occupied leafs the outside flood reached directly, collected with
+            // occupied leafs treated as barriers so the frontier stays at the
+            // holes instead of running on through the whole map
+            std::vector<node *> frontier;
         };
 
         fill_state g_fill;
@@ -203,7 +221,8 @@ namespace bsp
                             exitcost = nd;
                         }
                     }
-                    else if (nb->contents != contents_solid)
+                    else if (nb->contents != contents_solid
+                             && nb->contents != contents_sky)
                     {
                         auto it = dist.find(nb);
                         if (it == dist.end() || nd < it->second)
@@ -232,8 +251,10 @@ namespace bsp
             return true;
         }
 
-        // writes the simplified leak line (lin) and pointfile (pts)
-        bool write_leak_files(const std::string &ptsname, const std::string &linname)
+        // emits one already-built trail into open pts/lin files and reports the
+        // hole it pierces. shared by the single leak path and the -allleaks
+        // survey, which concatenates several trails into the same pair of files
+        bool emit_leak_trail(std::FILE *pts, std::FILE *lin, math::vec3v &hole_out)
         {
             int n = (int)g_fill.leaktrail.size();
             if (n < 1)
@@ -242,8 +263,7 @@ namespace bsp
             // the last point is the shell portal, whose center can sit past the
             // gap; the second to last is the constriction right at the hole
             math::vec3v hole = g_fill.leaktrail[(size_t)(n >= 2 ? n - 2 : n - 1)];
-            g_fill.leakexit = hole;
-            g_fill.haveleaktrail = true;
+            hole_out = hole;
 
             std::vector<char> keep((size_t)n, 0);
             keep[0] = keep[(size_t)n - 1] = 1;
@@ -254,17 +274,6 @@ namespace bsp
             {
                 if (keep[(size_t)i])
                     idx.push_back(i);
-            }
-
-            std::FILE *lin = std::fopen(linname.c_str(), "w");
-            std::FILE *pts = std::fopen(ptsname.c_str(), "w");
-            if (!lin || !pts)
-            {
-                if (lin)
-                    std::fclose(lin);
-                if (pts)
-                    std::fclose(pts);
-                err::fatal("couldn't open leak file %s / %s", ptsname.c_str(), linname.c_str());
             }
 
             for (size_t s = 0; s + 1 < idx.size(); s++)
@@ -290,10 +299,44 @@ namespace bsp
             const math::vec3v &last = g_fill.leaktrail[(size_t)idx.back()];
             std::fprintf(pts, "%f %f %f\n", (double)last[0], (double)last[1], (double)last[2]);
             write_leak_marker(pts, hole); // obvious blob at the hole
+            return true;
+        }
 
+        // opens the pair of leak files, or dies with the same message the
+        // single trail writer always used
+        void open_leak_files(const std::string &ptsname, const std::string &linname,
+                             std::FILE *&pts, std::FILE *&lin)
+        {
+            lin = std::fopen(linname.c_str(), "w");
+            pts = std::fopen(ptsname.c_str(), "w");
+            if (!lin || !pts)
+            {
+                if (lin)
+                    std::fclose(lin);
+                if (pts)
+                    std::fclose(pts);
+                err::fatal("couldn't open leak file %s / %s", ptsname.c_str(), linname.c_str());
+            }
+        }
+
+        // writes the simplified leak line (lin) and pointfile (pts)
+        bool write_leak_files(const std::string &ptsname, const std::string &linname)
+        {
+            if (g_fill.leaktrail.empty())
+                return false;
+            std::FILE *pts = nullptr;
+            std::FILE *lin = nullptr;
+            open_leak_files(ptsname, linname, pts, lin);
+            math::vec3v hole;
+            bool ok = emit_leak_trail(pts, lin, hole);
             std::fclose(lin);
             std::fclose(pts);
-            return true;
+            if (ok)
+            {
+                g_fill.leakexit = hole;
+                g_fill.haveleaktrail = true;
+            }
+            return ok;
         }
 
         void free_detail_node_r(node *n)
@@ -372,6 +415,108 @@ namespace bsp
             }
 
             return false;
+        }
+
+        // the survey flood: same walk as recursive_fill_outside, except an
+        // occupied leaf is a wall rather than a stopping condition. the flood
+        // therefore covers the region that is unambiguously outside and halts
+        // at every entity that can see out, which puts one frontier leaf at
+        // each hole instead of one for the entire map
+        void survey_outside_r(bsp_state &state, node *l)
+        {
+            if (l->contents == contents_solid || l->contents == contents_sky)
+                return;
+            if (l->valid == g_fill.valid)
+                return;
+            l->valid = g_fill.valid;
+
+            if (l->occupied)
+            {
+                g_fill.frontier.push_back(l);
+                return; // treat as a barrier so the flood stays outside
+            }
+
+            for (portal *p = l->portals; p;)
+            {
+                int s = (p->nodes[0] == l);
+                survey_outside_r(state, p->nodes[s]);
+                p = p->next[!s];
+            }
+        }
+
+        // walks every frontier entity, builds its shortest path out, and keeps
+        // one entry per distinct hole. several entities usually share a hole,
+        // so sites are merged by proximity of the exit point rather than of the
+        // entity
+        void survey_leaks(bsp_state &state, const std::string &ptsname,
+                          const std::string &linname)
+        {
+            constexpr vec_t same_hole = 128.0; // holes closer than this are one
+            constexpr size_t max_sites = 256;  // bound the per frontier dijkstra
+
+            g_fill.frontier.clear();
+            g_fill.valid++;
+            int s = !(state.outside_node.portals->nodes[1] == &state.outside_node);
+            survey_outside_r(state, state.outside_node.portals->nodes[s]);
+            if (g_fill.frontier.empty())
+                return;
+
+            // one representative per entity: a single entity can own several
+            // leafs along the same opening
+            std::vector<int> seen_entities;
+            std::vector<node *> reps;
+            for (node *l : g_fill.frontier)
+            {
+                if (std::find(seen_entities.begin(), seen_entities.end(), l->occupied)
+                    != seen_entities.end())
+                    continue;
+                seen_entities.push_back(l->occupied);
+                reps.push_back(l);
+            }
+
+            std::FILE *pts = nullptr;
+            std::FILE *lin = nullptr;
+            open_leak_files(ptsname, linname, pts, lin);
+
+            for (node *l : reps)
+            {
+                if (g_fill.sites.size() >= max_sites)
+                    break;
+                const format::entity &ent = state.entities[(size_t)l->occupied];
+                math::vec3v startpos;
+                get_origin_key(ent, startpos);
+                if (!build_shortest_leak_trail(state, l, startpos))
+                    continue;
+
+                int n = (int)g_fill.leaktrail.size();
+                math::vec3v hole = g_fill.leaktrail[(size_t)(n >= 2 ? n - 2 : n - 1)];
+                bool duplicate = false;
+                for (const leak_site &site : g_fill.sites)
+                {
+                    math::vec3v d;
+                    math::subtract(site.hole, hole, d);
+                    if (math::length(d) < same_hole)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate)
+                    continue;
+
+                math::vec3v written;
+                if (!emit_leak_trail(pts, lin, written))
+                    continue;
+                leak_site site;
+                site.classname = ent.value("classname");
+                site.origin = startpos;
+                site.hole = written;
+                site.hashole = true;
+                g_fill.sites.push_back(site);
+            }
+
+            std::fclose(lin);
+            std::fclose(pts);
         }
 
         void mark_faces_inside_r(node *n)
@@ -619,6 +764,10 @@ namespace bsp
             get_origin_key(state.entities[(size_t)g_fill.hit_occupied], startpos);
             build_shortest_leak_trail(state, g_fill.occupiednode, startpos);
             write_leak_files(state.base_path + ".pts", state.base_path + ".lin");
+            // the survey rewrites the same files with every hole's path, so it
+            // runs after the single trail and simply supersedes it
+            if (state.options.allleaks)
+                survey_leaks(state, state.base_path + ".pts", state.base_path + ".lin");
         }
 
         if (ret)
@@ -697,16 +846,41 @@ namespace bsp
         }
 
         logging::info("\n  !!! LEAK - map is not sealed (hull%s %s)\n", count == 1 ? "" : "s", hulls);
-        logging::info("    entity  %s @ (%.0f, %.0f, %.0f)\n",
-                      g_fill.leak_entclass, (double)g_fill.leak_entorigin[0],
-                      (double)g_fill.leak_entorigin[1], (double)g_fill.leak_entorigin[2]);
-        if (g_fill.leak_hashole)
+
+        if (g_fill.sites.size() > 1)
         {
-            logging::info("    hole    (%.0f, %.0f, %.0f)   marked in the pointfile\n",
-                          (double)g_fill.leak_hole[0], (double)g_fill.leak_hole[1],
-                          (double)g_fill.leak_hole[2]);
+            // -allleaks: every hole, so the whole set can be sealed in one pass
+            // through the editor instead of one hole per compile
+            logging::info("    found   %zu holes; all of their paths are in the pointfile\n",
+                          g_fill.sites.size());
+            size_t index = 0;
+            for (const leak_site &site : g_fill.sites)
+            {
+                index++;
+                logging::info("\n    hole %-3zu (%.0f, %.0f, %.0f)\n", index,
+                              (double)site.hole[0], (double)site.hole[1],
+                              (double)site.hole[2]);
+                logging::info("      from  %s @ (%.0f, %.0f, %.0f)\n",
+                              site.classname.c_str(), (double)site.origin[0],
+                              (double)site.origin[1], (double)site.origin[2]);
+            }
+            logging::info("\n    action  load the pointfile and seal every marked hole\n");
         }
-        logging::info("    action  load the pointfile in your editor and seal the marked hole\n");
+        else
+        {
+            logging::info("    entity  %s @ (%.0f, %.0f, %.0f)\n",
+                          g_fill.leak_entclass, (double)g_fill.leak_entorigin[0],
+                          (double)g_fill.leak_entorigin[1], (double)g_fill.leak_entorigin[2]);
+            if (g_fill.leak_hashole)
+            {
+                logging::info("    hole    (%.0f, %.0f, %.0f)   marked in the pointfile\n",
+                              (double)g_fill.leak_hole[0], (double)g_fill.leak_hole[1],
+                              (double)g_fill.leak_hole[2]);
+            }
+            logging::info("    action  load the pointfile in your editor and seal the marked hole\n");
+            if (!g_fill.sites.empty())
+                logging::info("    note    -allleaks surveyed the map and found only this one\n");
+        }
 
         logging::file(
             "\n  A LEAK is a hole in the map where the inside is exposed to the outside void.\n"

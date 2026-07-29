@@ -24,6 +24,9 @@ namespace bsp
         bool noopt = false;
         bool noclipnodemerge = false;
         bool leakonly = false;
+        // survey every hole instead of reporting only the first one found, and
+        // put all of their paths in one pointfile
+        bool allleaks = false;
         bool nulltex = true;
         bool nohull2 = false;
         int maxnode_size = default_maxnode_size;
