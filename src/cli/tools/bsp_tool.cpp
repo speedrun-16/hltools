@@ -14,6 +14,7 @@
 #include "bsp/pack.h"
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
+#include "bsp_info_tool.h"
 #include "compile_parameters.h"
 
 namespace stdfs = std::filesystem;
@@ -46,6 +47,7 @@ namespace tools
             logging::console(
                 "usage\n"
                 "  hltools bsp [options] <map>\n"
+                "  hltools bsp info <map[.bsp]>\n"
                 "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
                 "\n"
                 "  builds the bsp trees for all four hulls from csg's plane lists,\n"
@@ -243,6 +245,8 @@ namespace tools
 
     int run_bsp_tool(int argc, char **argv)
     {
+        if (argc >= 2 && str::iequals(argv[1], "info"))
+            return run_bsp_info_tool(argc - 1, argv + 1);
         if (argc >= 2 && str::iequals(argv[1], "pack"))
             return run_pack(argc, argv);
 

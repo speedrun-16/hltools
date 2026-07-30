@@ -19,7 +19,7 @@ Under development. Bugs, incomplete behavior and output differences may still oc
 | `hltools bsp` / `hlbsp` | Complete | Build BSP trees, clip hulls, portals, leak diagnostics and face extents |
 | `hltools vis` / `hlvis` | Complete | Compute and compress the potentially visible set |
 | `hltools rad` / `hlrad` | Complete | CPU radiosity lighting plus optional approximate Vulkan GPU gathering |
-| `hltools bspinfo` | Complete | Inspect BSP stages, entities, textures, WAD references and engine limits |
+| `hltools bsp info` | Complete | Inspect BSP stages, entities, textures, WAD references and engine limits |
 | `hltools bsp pack` | Available | Package a BSP and referenced assets with game-directory hierarchy and a `.res` file |
 | `hltools wad` | Complete | List, extract and build WAD3 texture archives; accepts WAD or BSP input |
 | `hltools lightmap` | Complete | Export all face lightmaps and styles to a deterministic 24-bit BMP atlas |
@@ -322,29 +322,6 @@ hlbsp [options] <map>
 
 </details>
 
-### `bsp pack`
-
-```text
-hltools bsp pack <map.bsp> <output-dir> [options]
-```
-
-Builds a distributable folder rooted like a GoldSrc game directory. The BSP is
-written to `maps/`, referenced assets retain paths such as `models/`, `sprites/`,
-`sound/`, and `gfx/env/`, and `maps/<map>.res` lists the files using the plain
-GoldSrc resource-list format.
-
-Dependencies are discovered from the entity lump, worldspawn WAD and sky
-settings, model texture/sequence companions, and existing map description,
-detail, navigation, and overview files. Entries from an existing map `.res` are
-merged as authoritative hand-declared dependencies.
-
-| Option | Effect |
-|---|---|
-| `-game <dir>` | Source game directory. Inferred when the input BSP is inside its `maps` directory |
-| `-base <dir>` | Installed base content to recognize but exclude from the package and `.res`; repeatable. Sibling roots such as `cstrike` and `valve` are inferred when available |
-| `-force` | Overwrite files already present below the output directory |
-| `-strict` | Fail without writing the package if any referenced resource is missing |
-
 <details>
 <summary><strong>VIS options</strong></summary>
 
@@ -453,15 +430,38 @@ Shadows, files and diagnostics:
 
 </details>
 
-### `bspinfo`
+### `bsp info`
 
 Inspect a BSP without modifying it:
 
 ```powershell
-hltools bspinfo maps/example.bsp
+hltools bsp info maps/example.bsp
 ```
 
 The report includes completed compiler stages, entities, embedded and external textures, WAD references, lightmap atlas usage and every BSP lump against its engine limit.
+
+### `bsp pack`
+
+```text
+hltools bsp pack <map.bsp> <output-dir> [options]
+```
+
+Builds a distributable folder rooted like a GoldSrc game directory. The BSP is
+written to `maps/`, referenced assets retain paths such as `models/`, `sprites/`,
+`sound/`, and `gfx/env/`, and `maps/<map>.res` lists the files using the plain
+GoldSrc resource-list format.
+
+Dependencies are discovered from the entity lump, worldspawn WAD and sky
+settings, model texture/sequence companions, and existing map description,
+detail, navigation, and overview files. Entries from an existing map `.res` are
+merged as authoritative hand-declared dependencies.
+
+| Option | Effect |
+|---|---|
+| `-game <dir>` | Source game directory. Inferred when the input BSP is inside its `maps` directory |
+| `-base <dir>` | Installed base content to recognize but exclude from the package and `.res`; repeatable. Sibling roots such as `cstrike` and `valve` are inferred when available |
+| `-force` | Overwrite files already present below the output directory |
+| `-strict` | Fail without writing the package if any referenced resource is missing |
 
 ### `wad`
 
@@ -695,7 +695,7 @@ Each key except `classname` and `origin` is a texture name.
 
 The console shows changed settings, compact loading statistics, live phase progress, rows above 15% in the BSP usage chart, warning totals and a final elapsed time line. The logfile keeps the full settings table, phase detail and complete BSP chart.
 
-`hltools bspinfo` exposes the same BSP limit accounting without recompiling a map.
+`hltools bsp info` exposes the same BSP limit accounting without recompiling a map.
 
 ## Accuracy and compatibility
 
@@ -704,7 +704,7 @@ The console shows changed settings, compact loading statistics, live phase progr
 | CPU `csg`, `bsp`, `vis`, `rad` | Reference compatible path for supported maps and options |
 | `hltools compile` | Same stage implementations with a memory handoff and one combined log |
 | `rad -gpu` | Deterministic approximate acceleration; small differences from floating point calculations are expected |
-| `bspinfo`, `wad list`, `lightmap` | Do not modify their input BSP or WAD |
+| `bsp info`, `wad list`, `lightmap` | Do not modify their input BSP or WAD |
 | `wad extract/build` | Preserves indexed pixels, four mip levels and the 256-color palette |
 | `decompile` | Attempts structural reconstruction; original brushes and grouping cannot be recovered |
 
@@ -760,7 +760,7 @@ flowchart TD
     CLI --> BSP["bsp"]
     CLI --> VIS["vis"]
     CLI --> RAD["rad"]
-    CLI --> UTIL["bspinfo / wad / lightmap / decompile"]
+    CLI --> UTIL["bsp info / bsp pack / wad / lightmap / decompile"]
     RAD --> GPU["optional Vulkan compute backend"]
     CSG --> FORMAT["format<br/>BSP, WAD, entities, images"]
     BSP --> FORMAT

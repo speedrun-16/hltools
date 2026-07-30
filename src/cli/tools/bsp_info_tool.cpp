@@ -1,4 +1,4 @@
-#include "bspinfo_tool.h"
+#include "bsp_info_tool.h"
 
 #include <cstring>
 #include <string>
@@ -19,11 +19,11 @@ namespace tools
 {
     namespace
     {
-        void print_bspinfo_help()
+        void print_bsp_info_help()
         {
             logging::console(
                 "usage\n"
-                "  hltools bspinfo <map[.bsp]>\n"
+                "  hltools bsp info <map[.bsp]>\n"
                 "\n"
                 "  reports a compiled bsp's contents: compiled stages, entity and\n"
                 "  texture counts, the wads it references, and how full every lump\n"
@@ -60,13 +60,13 @@ namespace tools
         }
     }
 
-    int run_bspinfo_tool(int argc, char **argv)
+    int run_bsp_info_tool(int argc, char **argv)
     {
         cli::args args(argc, argv);
         if (args.empty() || args.map_name().empty() || args.has("-h") || args.has("-help")
             || args.has("--help"))
         {
-            print_bspinfo_help();
+            print_bsp_info_help();
             return (args.has("-h") || args.has("-help") || args.has("--help")) ? 0 : 1;
         }
 
@@ -74,7 +74,7 @@ namespace tools
         format::map_data map;
         if (!format::bsp_file::load(bsp_path, map))
         {
-            logging::console("bspinfo: could not load '%s'\n", bsp_path.c_str());
+            logging::console("bsp info: could not load '%s'\n", bsp_path.c_str());
             return 1;
         }
 
@@ -98,7 +98,7 @@ namespace tools
         const bool has_light = !map.lighting.empty();
 
         char b1[32];
-        logging::console("\nbspinfo: %s\n\n", bsp_path.c_str());
+        logging::console("\nbsp info: %s\n\n", bsp_path.c_str());
         logging::console("  %-14s 30 (goldsrc)\n", "version");
         logging::console("  %-14s %s\n", "file size",
                          str::human_bytes(fs::size(bsp_path), b1, sizeof(b1)));

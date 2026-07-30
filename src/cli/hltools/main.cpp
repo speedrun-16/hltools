@@ -8,7 +8,6 @@
 #include "../tools/bsp_tool.h"
 #include "../tools/vis_tool.h"
 #include "../tools/rad_tool.h"
-#include "../tools/bspinfo_tool.h"
 #include "../tools/lightmap_tool.h"
 #include "../tools/wad_tool.h"
 #include "../tools/decompile_tool.h"
@@ -36,7 +35,7 @@ namespace
             "  rad          radiosity lighting\n"
             "\n"
             "map / bsp tools\n"
-            "  bspinfo      report a compiled bsp's contents and limits\n"
+            "  bsp info     report a compiled bsp's contents and limits\n"
             "  bsp pack     collect a BSP's resources and generate its .res file\n"
             "  lightmap     export compiled lightmaps as a 24-bit bmp atlas\n"
             "  ripent       import / export the entity lump                  (planned)\n"
@@ -92,8 +91,6 @@ int main(int argc, char **argv)
         return tools::run_vis_tool(sub_argc, sub_argv.data());
     if (str::iequals(command, "rad"))
         return tools::run_rad_tool(sub_argc, sub_argv.data());
-    if (str::iequals(command, "bspinfo"))
-        return tools::run_bspinfo_tool(sub_argc, sub_argv.data());
     if (str::iequals(command, "lightmap"))
         return tools::run_lightmap_tool(sub_argc, sub_argv.data());
     if (str::iequals(command, "wad"))

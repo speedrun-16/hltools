@@ -397,7 +397,7 @@ add_executable(hltools
     src/cli/tools/bsp_tool.cpp
     src/cli/tools/vis_tool.cpp
     src/cli/tools/rad_tool.cpp
-    src/cli/tools/bspinfo_tool.cpp
+    src/cli/tools/bsp_info_tool.cpp
     src/cli/tools/lightmap_tool.cpp
     src/cli/tools/wad_tool.cpp
     src/cli/tools/decompile_tool.cpp
