@@ -6,16 +6,37 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # recreate the rolling release before either platform starts so both archives
+  # are attached to a tag that points at this commit
+  prepare-release:
+    name: Prepare nightly release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Move the nightly tag to this commit
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+          gh release create nightly \
+            --target "$GITHUB_SHA" \
+            --title "Nightly build ${GITHUB_SHA:0:7}" \
+            --notes "Automatic build of main at ${GITHUB_SHA}. Windows and Linux archives are attached by the platform build jobs." \
+            --prerelease
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    needs: prepare-release
 
     strategy:
       fail-fast: false
@@ -27,14 +48,12 @@ jobs:
             shader_platform: linux-x86_64
             shader_compiler: glslc
             unified_archive: hltools-linux-x64.tar.gz
-            stages_archive: hltools-stages-linux-x64.tar.gz
           - name: windows
             os: windows-2022
             generator: Visual Studio 17 2022
             shader_platform: windows-x86_64
             shader_compiler: glslc.exe
             unified_archive: hltools-windows-x64.zip
-            stages_archive: hltools-stages-windows-x64.zip
 
     steps:
       - name: Check out source
@@ -70,41 +89,35 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p package/unified package/stages
+          mkdir -p package/unified
           cp bin/hltools package/unified/
-          cp bin/stages/* package/stages/
-          cp README.md LICENSE package/unified/
-          cp README.md LICENSE package/stages/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md package/unified/
           tar -czf "${{ matrix.unified_archive }}" -C package/unified .
-          tar -czf "${{ matrix.stages_archive }}" -C package/stages .
 
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path package/unified | Out-Null
-          New-Item -ItemType Directory -Path package/stages | Out-Null
           Copy-Item bin/hltools.exe package/unified/
-          Copy-Item bin/stages/*.exe package/stages/
           Copy-Item README.md package/unified/
           Copy-Item LICENSE package/unified/
-          Copy-Item README.md package/stages/
-          Copy-Item LICENSE package/stages/
+          Copy-Item THIRD_PARTY_NOTICES.md package/unified/
           Compress-Archive -Path package/unified/* -DestinationPath "${{ matrix.unified_archive }}"
-          Compress-Archive -Path package/stages/* -DestinationPath "${{ matrix.stages_archive }}"
 
       - name: Upload unified archive
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           path: ${{ matrix.unified_archive }}
           archive: false
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload standalone stages archive
-        uses: actions/upload-artifact@v7
-        with:
-          path: ${{ matrix.stages_archive }}
-          archive: false
-          if-no-files-found: error
-          retention-days: 14
+      - name: Attach archive to nightly release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload nightly "${{ matrix.unified_archive }}" --clobber
