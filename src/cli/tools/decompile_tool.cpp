@@ -36,6 +36,7 @@ namespace tools
                 "  hltools decompile <map.bsp> <output.map> [-wad <output.wad>] [-force]\n"
                 "                    [-game <dir>] [-skysize <n>] [-skyexposure <n>]\n"
                 "                    [-maxtexsize <n>] [-fulltex <material> ...]\n"
+                "                    [-reconstruct]\n"
                 "\n"
                 "  goldsrc maps: reconstructs editable Valve 220 brushes from the BSP's\n"
                 "  hull-0 tree; embedded textures are written to <output>.wad.\n"
@@ -48,6 +49,7 @@ namespace tools
                 "options\n"
                 "  -wad <file>   override the automatic companion WAD path\n"
                 "  -force        overwrite existing output files\n"
+                "  -reconstruct  ignore source.map and reconstruct from the BSP\n"
                 "  -game <dir>   source content root for materials not in the pakfile;\n"
                 "                repeat for each content tree, searched in order. a\n"
                 "                source game splits content across trees, so a mod\n"
@@ -354,6 +356,7 @@ namespace tools
         }
 
         bool force = false;
+        bool ignore_embedded_source = false;
         bool explicit_wad = false;
         std::string wad_path;
         std::vector<std::string> game_dirs;
@@ -368,6 +371,11 @@ namespace tools
             if (str::iequals(argv[i], "-force"))
             {
                 force = true;
+                continue;
+            }
+            if (str::iequals(argv[i], "-reconstruct"))
+            {
+                ignore_embedded_source = true;
                 continue;
             }
             if (str::iequals(argv[i], "-wad"))
@@ -515,7 +523,7 @@ namespace tools
             return 1;
         }
 
-        if (!map.embedded_zip.empty())
+        if (!ignore_embedded_source && !map.embedded_zip.empty())
         {
             std::vector<unsigned char> source;
             std::string entry;

@@ -508,7 +508,12 @@ hltools decompile maps/example.bsp decompiled/example.map
 hltools decompile maps/example.bsp decompiled/example.map -wad decompiled/example.wad
 ```
 
-The decompiler reconstructs convex Valve 220 brushes from the BSP hull-0 tree. Embedded source textures are written to a companion WAD automatically and the resulting path is added to worldspawn. `-wad` overrides that path and `-force` permits overwriting.
+The decompiler reconstructs convex Valve 220 brushes from the BSP hull-0 tree.
+Embedded source textures are written to a companion WAD automatically and the
+resulting path is added to worldspawn. When an embedded source MAP is available,
+it is restored by default; `-reconstruct` skips it and reconstructs from BSP
+geometry. `-wad` overrides the companion WAD path and `-force` permits
+overwriting.
 
 The decompilation approach is based primarily on [HalfLife.UnifiedSdk.MapDecompiler](https://github.com/twhl-community/HalfLife.UnifiedSdk.MapDecompiler/)
 
