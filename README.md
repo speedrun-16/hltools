@@ -2,9 +2,10 @@
 
 hltools is a modern rewrite of the [SDHLT](https://github.com/seedee/SDHLT/) tools, focused on faster compilation, clearer diagnostics, new map and asset utilities.
 
-The toolchain preserves established compiler behavior and map compatibility while using a cleaner architecture, reusable libraries and a unified command line interface.
+The toolchain preserves established compiler behavior and map compatibility while using a cleaner architecture, reusable libraries and a unified command line interface. `hltools compile` is the primary compilation workflow.
 
-Standalone CSG, BSP, VIS and RAD exe stages remain available for traditional compile setups.
+Compiler stages are exposed as `hltools csg`, `hltools bsp`, `hltools vis` and
+`hltools rad`; there are no separate stage executables.
 
 ## Work in progress
 
@@ -15,15 +16,15 @@ Under development. Bugs, incomplete behavior and output differences may still oc
 | Command | Status | Purpose |
 |---|---:|---|
 | `hltools compile` | Complete | Run CSG, BSP, VIS, RAD in one process |
-| `hltools csg` / `hlcsg` | Complete | Parse MAP files, carve brushes, build hull inputs, resolve WAD textures |
-| `hltools bsp` / `hlbsp` | Complete | Build BSP trees, clip hulls, portals, leak diagnostics and face extents |
-| `hltools vis` / `hlvis` | Complete | Compute and compress the potentially visible set |
-| `hltools rad` / `hlrad` | Complete | CPU radiosity lighting plus optional approximate Vulkan GPU gathering |
+| `hltools csg` | Complete | Parse MAP files, carve brushes, build hull inputs, resolve WAD textures |
+| `hltools bsp` | Complete | Build BSP trees, clip hulls, portals, leak diagnostics and face extents |
+| `hltools vis` | Complete | Compute and compress the potentially visible set |
+| `hltools rad` | Complete | CPU radiosity lighting plus optional approximate Vulkan GPU gathering |
 | `hltools bsp info` | Complete | Inspect BSP stages, entities, textures, WAD references and engine limits |
-| `hltools bsp pack` | Available | Package a BSP and referenced assets with game-directory hierarchy and a `.res` file |
+| `hltools bsp pack` | Available | Package a BSP and referenced assets as a game-directory tree or ZIP with a `.res` file |
 | `hltools wad` | Complete | List, extract and build WAD3 texture archives; accepts WAD or BSP input |
 | `hltools lightmap` | Complete | Export all face lightmaps and styles to a deterministic 24-bit BMP atlas |
-| `hltools decompile` | Complete | Reconstruct an editable Valve 220 MAP and companion WAD from a BSP |
+| `hltools decompile` | Complete | Decompile GoldSrc BSPs or port Source BSPs to GoldSrc MAP, WAD, and asset output |
 | `hltools ripent` | Planned | Import and export entity and texture lumps |
 | `hltools model` | Available | Convert Source studio models and build full-resolution GoldSrc skybox models |
 
@@ -90,7 +91,8 @@ The exact luxel totals identify the textures to fix. Page usage can be slightly 
 ## Building
 
 Compiled Release archives for Windows and Linux are available from successful GitHub Actions runs. \
-Each run provides a unified `hltools` artifact and a separate `hltools-stages` artifact containing `hlcsg`, `hlbsp`, `hlvis` and `hlrad`.
+Each run provides the supported `hltools` artifact. Builds from `main` are also
+published to the rolling [nightly release](https://github.com/speedrun-16/hltools/releases/tag/nightly).
 
 Requirements:
 
@@ -98,7 +100,10 @@ Requirements:
 - A C++17 compiler. Visual Studio 2022 is the primary Windows configuration.
 - Optional GPU backend: `glslc` from the Vulkan SDK and a device with Vulkan support.
 
-GPU support is enabled automatically when `glslc` is available. The first GPU build downloads pinned Vulkan headers into `build/_extern`. Use `-DHLTOOLS_GPU=OFF` for a CPU only build.
+The build downloads pinned libzip and zlib sources and links them statically for
+embedded map-source archives. GPU support is enabled automatically when `glslc`
+is available. The first GPU build also downloads pinned Vulkan headers into
+`build/_extern`. Use `-DHLTOOLS_GPU=OFF` for a CPU only build.
 
 The commands below start in the repository root.
 
@@ -124,8 +129,7 @@ cmake --build build --parallel
 ./bin/hltools -h
 ```
 
-The complete build also produces the standalone compiler stages in `bin/stages`
-and verification executables in `bin/tests`.
+The complete build also produces verification executables in `bin/tests`.
 
 ## Compilation workflow
 
@@ -173,8 +177,6 @@ hltools bsp maps/example
 hltools vis maps/example
 hltools rad -extra maps/example
 ```
-
-The standalone equivalents are `hlcsg`, `hlbsp`, `hlvis` and `hlrad`.
 
 Run `hltools <command> -h` for the authoritative option list. Options may appear before or after the map name for individual compiler commands.
 
@@ -250,10 +252,34 @@ Accepts all CSG, BSP, VIS and RAD options, plus:
 | Option | Effect |
 |---|---|
 | `-dumpintermediates` | Write the CSG intermediate files instead of keeping only the memory handoff |
+| `-noembedsource` | Do not append the editable map-source ZIP to the BSP |
 | `-nochart` | Skip the final BSP usage chart |
 | `-threads <n>` | Set the shared worker count; the default uses all cores |
 
 `-onlyents` is intentionally supported only by CSG and is rejected by `hltools compile`.
+
+Map source is embedded by default. The root `source.map` is self-contained:
+it contains the effective `info_compile_parameters` and only the effective
+`info_texlights` definitions for textures referenced by compiled faces.
+
+`info_compile_parameters` uses stage-prefixed keys. Boolean options use `1`;
+value options contain the option value:
+
+```text
+{
+"classname" "info_compile_parameters"
+"vis_fast" "1"
+"rad_extra" "1"
+"rad_bounce" "12"
+}
+```
+
+The entity supplies stage-specific defaults to both `hltools compile` and the
+individual `hltools csg`, `bsp`, `vis`, and `rad` commands. An actual
+command-line value wins. In a traditional stage chain the entity travels
+through intermediate BSPs so each stage can consume its keys, then RAD removes
+it from the runtime entity lump. Commands operating on an embedded final BSP
+read the recipe from its root MAP instead.
 
 > [!NOTE]
 > **Changed default:** `AAATRIGGER` render faces are now preserved by default, and the old `-nonullifytrigger` option was removed. Pass `-nullifytrigger` to get the previous default behavior that strips trigger faces to NULL.
@@ -269,7 +295,6 @@ Accepts all CSG, BSP, VIS and RAD options, plus:
 
 ```text
 hltools csg [options] <map>
-hlcsg [options] <map>
 ```
 
 | Group | Option | Effect |
@@ -301,7 +326,6 @@ hlcsg [options] <map>
 
 ```text
 hltools bsp [options] <map>
-hlbsp [options] <map>
 ```
 
 | Group | Option | Effect |
@@ -329,7 +353,6 @@ hlbsp [options] <map>
 
 ```text
 hltools vis [options] <map>
-hlvis [options] <map>
 ```
 
 | Option | Effect |
@@ -349,7 +372,6 @@ hlvis [options] <map>
 
 ```text
 hltools rad [options] <map>
-hlrad [options] <map>
 ```
 
 Quality and performance:
@@ -510,12 +532,65 @@ hltools decompile maps/example.bsp decompiled/example.map
 hltools decompile maps/example.bsp decompiled/example.map -wad decompiled/example.wad
 ```
 
-The decompiler reconstructs convex Valve 220 brushes from the BSP hull-0 tree.
-Embedded source textures are written to a companion WAD automatically and the
-resulting path is added to worldspawn. When an embedded source MAP is available,
-it is restored by default; `-reconstruct` skips it and reconstructs from BSP
-geometry. `-wad` overrides the companion WAD path and `-force` permits
-overwriting.
+#### GoldSrc BSPs
+
+When an hltools source archive is present, the decompiler writes its root MAP
+directly. Otherwise it reconstructs convex Valve 220 brushes from the BSP
+hull-0 tree. During reconstruction, embedded source textures are written to a
+companion WAD automatically and the resulting path is added to worldspawn.
+`-reconstruct` skips the archived MAP and reconstructs the map normally.
+`-wad` overrides the companion WAD path and `-force` permits overwriting.
+
+You can inspect the embedded archive with 7-Zip by opening the BSP like a normal
+archive.
+
+#### Embedded source format
+
+Optional data follows the aligned end of the last standard lump:
+
+```text
+[GoldSrc BSP][BSPX directory][HLTOOLS_EMBED_LOCATOR][ZIP to end of file]
+```
+
+`HLTOOLS_EMBED_LOCATOR` contains this little-endian version-1 payload:
+
+```c
+uint16_t version;      // 1
+uint16_t header_size;  // 16
+uint32_t flags;        // reserved, zero
+uint64_t zip_offset;   // absolute file offset; ZIP continues to EOF
+```
+
+Vanilla GoldSrc reads the standard lumps and ignores the trailing extension.
+
+#### Source BSP porting
+
+Source-engine BSPs are detected from their `VBSP` header and use a separate
+porting path:
+
+```powershell
+hltools decompile source.bsp staging/map.map -game path/to/game -game path/to/hl2 -toolwad sdhlt.wad
+```
+
+> [!NOTE]
+> Source BSP porting currently uses `hltools decompile`. It is planned to move
+> to `hltools bsp port`, leaving `decompile` focused on embedded restoration and
+> structural decompilation of GoldSrc BSPs. The current invocation will remain
+> available as a compatibility alias during the transition.
+
+Source BSPs retain their original brushes and brushsides, so hltools ports those
+records directly instead of reconstructing solids from the BSP tree. It remaps
+entities to GoldSrc equivalents, tessellates displacements into `func_detail`
+triangle brushes with simplified collision brushes, and drops 3D skybox brushes,
+which have no GoldSrc equivalent.
+
+Materials and referenced studio models are resolved from the BSP pakfile first,
+then from each repeatable `-game` content root and its VPK archives. Materials
+are converted into a companion WAD, static props become `cycler_sprite`
+entities, and converted models retain their `models/` paths. The Source 2D
+skybox is exported beneath `gfx/env/`. These paths are rooted beside the output
+MAP, producing a folder that can be used as GoldSrc game content. `-toolwad`
+adds a WAD providing compiler textures such as `NULL`, `CLIP`, and `SKY`.
 
 The decompilation approach is based primarily on [HalfLife.UnifiedSdk.MapDecompiler](https://github.com/twhl-community/HalfLife.UnifiedSdk.MapDecompiler/)
 
@@ -530,7 +605,7 @@ The decompilation approach is based primarily on [HalfLife.UnifiedSdk.MapDecompi
 | `func_group` | Moves its brushes into worldspawn and removes the entity | Not applicable |
 | `func_detail` | Uses the same merge as `func_group`. Detail behavior comes from the `zhlt_detaillevel` values retained on its brushes | Detail level `0` |
 | `info_hullshape` | Defines a named collision hull from at most one brush other than ORIGIN. `defaulthulls` bits `2`, `4` and `8` assign the shape to hulls 1, 2 and 3. `disabled 1` makes a selected shape use normal hull expansion | `defaulthulls 0` and `disabled 0` |
-| `info_compile_parameters` | Stops compilation with an error. Compiler settings must be passed on the command line | Not applicable |
+| `info_compile_parameters` | Supplies stage-prefixed defaults to unified and individual compiler commands. Traditional intermediate BSPs carry it until RAD removes it; embedded BSPs expose the recipe through their root MAP. Explicit command-line values win | No compiler defaults |
 | Named lights | Lights with a `targetname` share an allocated engine style from 32 through 63. Redundant targetnames on the same style are removed unless `-nolightopt` is used | Optimization on and unnamed lights on style `0` |
 | `info_sunlight` | Writes a marked `light_environment` for the sun values used by runtime model lighting. RAD excludes this copy from compiled map lighting | No entity |
 | `light_shadow` | Retains `convertfrom` metadata for RAD and changes to the runtime `convertto` classname | `convertto light` |
@@ -669,7 +744,7 @@ Each key except `classname` and `origin` is a texture name.
 
 | Entity | Value | Default |
 |---|---|---|
-| `info_texlights` | Defines emitted color using RAD file syntax. An earlier definition loaded from a RAD file keeps precedence for the same texture | No emission definition |
+| `info_texlights` | Defines emitted color using RAD file syntax. Its definitions override earlier RAD-file definitions for the same texture | No emission definition |
 | `info_minlights` | Sets the minimum light for the texture in the range 0 through 1 | No texture specific minimum |
 | `info_unlittextures` | Bakes a constant-white lightmap on faces using each enabled texture, preserving whole-surface fullbright materials such as Source `UnlitGeneric` | Normal lightmapping |
 | `info_chopscale` | Multiplies the calculated patch size by a positive value. Zero and negative values are ignored | `1` |
@@ -713,7 +788,7 @@ The console shows changed settings, compact loading statistics, live phase progr
 | `rad -gpu` | Deterministic approximate acceleration; small differences from floating point calculations are expected |
 | `bsp info`, `wad list`, `lightmap` | Do not modify their input BSP or WAD |
 | `wad extract/build` | Preserves indexed pixels, four mip levels and the 256-color palette |
-| `decompile` | Attempts structural reconstruction; original brushes and grouping cannot be recovered |
+| `decompile` | Restores an embedded GoldSrc MAP, reconstructs GoldSrc BSP geometry, or ports a Source VBSP to GoldSrc MAP, WAD, and assets |
 
 For strict reference comparisons, use CPU RAD and a fixed thread count, normally `-threads 1`.
 
@@ -750,6 +825,7 @@ reproduces the less conservative centroid selection, while
 - Implement `hltools ripent` for importing and exporting entity lumps and embedded textures.
 - Implement GoldSrc QC/SMD compilation and decompilation under `hltools model`; `model convert` writes binary `.mdl` directly and has no QC/SMD path.
 - Implement studio model shadows requested by `env_static` and `zhlt_studioshadow`.
+- Move Source BSP conversion to `hltools bsp port`, retaining the current `decompile` route as a compatibility alias during the transition.
 - Implement VIS `-maxdistance`; it is recognized today but fails explicitly.
 - Parallelize useful BSP work; `-threads` configures the shared pool, but most BSP processing is still serial.
 - Continue expanding compiler fixtures, complete pipeline maps, regression cases and automated test coverage.
@@ -757,13 +833,13 @@ reproduces the less conservative centroid selection, while
 - Add strict validation of unknown options to the four compiler parsers; newer asset commands already reject unknown options.
 - Decide whether the omitted legacy cosmetic controls such as `-nolog`, `-verbose`, priority, language and distributed netvis are still useful.
 
-Unsupported functionality fails explicitly where silent fallback could produce a misleading BSP. `info_compile_parameters` is rejected; use command line options instead.
+Unsupported functionality fails explicitly where silent fallback could produce a misleading BSP.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    CLI["CLI front ends<br/>hltools and standalone stages"] --> CSG["csg"]
+    CLI["hltools CLI"] --> CSG["csg"]
     CLI --> BSP["bsp"]
     CLI --> VIS["vis"]
     CLI --> RAD["rad"]
