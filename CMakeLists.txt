@@ -15,6 +15,13 @@ include(FetchContent)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# keep the windows release self contained instead of requiring the visual c++
+# redistributable beside the executable
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # keep runnable artifacts with the source tree instead of burying them in
 # whichever out of tree directory was selected for cmake's build files
 set(HLTOOLS_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin")
@@ -65,7 +72,7 @@ add_compile_definitions(
 
 # embedded map sources use a standards compliant zip tail; keep libzip and its
 # zlib backend static so the command line tool remains a single file binary
-set(BUILD_SHARED_LIBS OFF)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     zlib
@@ -74,6 +81,7 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(zlib)
+set_target_properties(zlib PROPERTIES EXCLUDE_FROM_ALL TRUE)
 if(NOT TARGET ZLIB::ZLIB)
     add_library(ZLIB::ZLIB ALIAS zlibstatic)
 endif()
