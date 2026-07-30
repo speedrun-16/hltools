@@ -38,7 +38,7 @@ namespace tools
                 "  -threads <n>          worker threads             (default: all cores)\n"
                 "\n"
                 "common picks: -fast for iteration builds, -extra -gpu for\n"
-                "quality compiles, -nowadtextures (csg) to embed all textures.\n");
+                "quality compiles, -wadtextures (csg) to keep textures in the wads.\n");
         }
     }
 

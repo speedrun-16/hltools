@@ -38,7 +38,7 @@ namespace tools
         options.brush.clip = clip_type_arg(args);
         options.brush_union_threshold = (vec_t)args.float_value("-brushunion", options.brush_union_threshold);
         options.wad.map_path = map_path;
-        options.wad.wad_textures = !args.has("-nowadtextures");
+        options.wad.wad_textures = args.has("-wadtextures");
         options.wad.wad_auto_detect = !args.has("-nowadautodetect");
         for (const auto &include : args.values("-wadinclude"))
             options.wad.wad_include.push_back(include);
@@ -52,8 +52,22 @@ namespace tools
         if (const char *null_file = args.value("-nullfile", nullptr))
             options.invisible_items = csg::load_invisible_items(null_file);
 
-        logging::setting("wadtextures", options.wad.wad_textures ? "on" : "off", "on",
-                         !options.wad.wad_textures);
+        logging::setting("wadtextures", options.wad.wad_textures ? "on" : "off", "off",
+                         options.wad.wad_textures);
+
+        // embedding drops every wad from the runtime list, so the options that
+        // only shape that list have nothing left to act on. -wadcfgfile and
+        // -wadconfig still matter: they say which wads the textures are read
+        // from in the first place.
+        if (!options.wad.wad_textures)
+        {
+            if (args.has("-nowadautodetect"))
+                logging::warn("-nowadautodetect has no effect without -wadtextures: "
+                              "embedded textures leave no wad list to prune");
+            if (!args.values("-wadinclude").empty())
+                logging::warn("-wadinclude has no effect without -wadtextures: "
+                              "every used texture is already embedded");
+        }
         logging::setting("clip type", csg::clip_type_name(options.brush.clip), "simple",
                          args.has("-cliptype"));
         return options;
@@ -71,7 +85,8 @@ namespace tools
                 "  brushes, and resolves the map's textures from its wads.\n"
                 "\n"
                 "textures\n"
-                "  -nowadtextures        embed every used texture into the bsp\n"
+                "  -wadtextures          keep textures in the wads and reference them at\n"
+                "                        runtime (default: embed them into the bsp)\n"
                 "  -wadinclude <name>    embed textures from wads matching <name> (repeatable)\n"
                 "  -nowadautodetect      disable wad auto-detection\n"
                 "  -wadcfgfile <file>    wad configuration file\n"

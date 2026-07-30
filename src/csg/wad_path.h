@@ -11,7 +11,11 @@ namespace csg
 {
     struct wad_build_options
     {
-        bool wad_textures = true;
+        // false embeds every used texture in the bsp, which is the default so a
+        // compiled map is self contained. true instead leaves the textures in
+        // the wads and records those paths on worldspawn, so the engine loads
+        // them at runtime and the bsp stays small.
+        bool wad_textures = false;
         bool wad_auto_detect = true;
         std::vector<std::string> wad_include = {"hltools.wad"};
         std::string wad_cfg_file;

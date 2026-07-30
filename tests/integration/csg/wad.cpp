@@ -112,6 +112,7 @@ int main()
     ok &= expect(wad.find_texture("stone") != nullptr, "find texture case insensitive");
 
     csg::csg_options runtime_options;
+    runtime_options.wad.wad_textures = true; // not the default: reference the wads
     csg::csg_result runtime = csg::run_csg(cube_map(wad_path.c_str()), runtime_options);
     binary::reader runtime_input(runtime.textures);
     std::int32_t runtime_count = 0;
@@ -127,8 +128,7 @@ int main()
     ok &= expect(std::string(runtime.map.entities[0].value("wad")) == "textures.wad;", "runtime wad value");
     ok &= expect(runtime.texinfos.entries()[0].info.miptex == 0, "runtime texinfo remap");
 
-    csg::csg_options embedded_options;
-    embedded_options.wad.wad_textures = false;
+    csg::csg_options embedded_options; // embedding is the default
     csg::csg_result embedded = csg::run_csg(cube_map(wad_path.c_str()), embedded_options);
     binary::reader embedded_input(embedded.textures);
     std::int32_t embedded_ofs = 0;
@@ -156,6 +156,9 @@ int main()
     ok &= expect(std::string(cfg_result.map.entities[0].value("wad")).empty(), "wadcfg include removes wad value");
 
     csg::csg_options no_auto_options;
+    // the wad list only survives in the bsp when textures are referenced rather
+    // than embedded, so pruning is observable only in that mode
+    no_auto_options.wad.wad_textures = true;
     no_auto_options.wad.wad_auto_detect = false;
     std::string two_wads = wad_path + ";" + unused_wad_path;
     csg::csg_result no_auto = csg::run_csg(cube_map(two_wads.c_str()), no_auto_options);
