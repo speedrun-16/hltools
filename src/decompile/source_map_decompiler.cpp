@@ -154,7 +154,7 @@ namespace decompile
         // true when the texture axes project onto the face plane; source reuses
         // texinfo across the sides of a brush, so a side can carry axes that are
         // edge-on to its own plane. vbsp never drew those sides, but goldsrc
-        // does, and hlrad fatals ("Malformed face normal") building the lightmap
+        // does, and rad fatals ("Malformed face normal") building the lightmap
         // projection for them.
         bool axes_projectable(const float vecs[2][4], const vec3 &normal)
         {
@@ -390,7 +390,7 @@ namespace decompile
 
         // builds one document brush from a source brush: bevel and degenerate
         // sides are dropped, planes become canonical map sides (every face on a
-        // shared source plane serializes identically, so hlcsg collapses them
+        // shared source plane serializes identically, so csg collapses them
         // into one splitting plane), and texture axes come from the catalog.
         bool build_brush(const format::source_map_data &map, int brush_index,
                          const vec3 &model_origin, bool world_model,
@@ -401,7 +401,7 @@ namespace decompile
             out = format::map_brush{};
             out.sides.reserve((std::size_t)brush.numsides);
 
-            // hlcsg keys the clip hulls off the texture name, so a clip volume
+            // csg keys the clip hulls off the texture name, so a clip volume
             // has to carry CLIP on every side rather than the NULL its nodraw
             // surface flag would otherwise produce. only world geometry gets it:
             // CLIP rewrites a brush into the collision hulls alone, which would
@@ -729,7 +729,7 @@ namespace decompile
         // hammerid was already removed from every entity by the common remap
         // pass. Origin is dropped here because it would otherwise make every
         // entity unique, and goldsrc brush entities do not want an origin at
-        // all (hlcsg traces leaks from entity origins, and a centroid landing
+        // all (csg traces leaks from entity origins, and a centroid landing
         // in open space invents a leak).
         void merge_static_brush_entities(format::map_document &doc, source_result &result)
         {
@@ -1089,7 +1089,7 @@ namespace decompile
         result.text = doc.write();
         result.wad_textures = catalog.textures();
 
-        // every texture the map names has to exist in some wad for hlcsg to size
+        // every texture the map names has to exist in some wad for csg to size
         // it. the engine textures (NULL, SKY, AAATRIGGER, ...) come from no
         // source material, so they have to be supplied by a tool wad such as
         // sdhlt.wad, named with -toolwad and added to the worldspawn wad list.

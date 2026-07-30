@@ -870,7 +870,7 @@ namespace csg
 
         if (map.map_file_version < 220 || (!map.sides.empty() && map.sides[0].texture.txcommand != 0))
         {
-            logging::warn("hlcsg scaling hack is not supported in worldcraft 2.1- or quark mode");
+            logging::warn("hltools csg scaling hack is not supported in worldcraft 2.1- or quark mode");
             return;
         }
 

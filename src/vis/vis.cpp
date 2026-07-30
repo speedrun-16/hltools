@@ -567,7 +567,7 @@ namespace vis
         state.options = options;
 
         if (state.options.portal_path.empty())
-            err::fatal("hlvis requires a portal file path");
+            err::fatal("hltools vis requires a portal file path");
 
         collect_leaf_entities(state);
         load_portals(state, state.options.portal_path);

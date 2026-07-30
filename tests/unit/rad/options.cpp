@@ -11,7 +11,7 @@ namespace
 {
     rad::rad_options parse(const std::string &base)
     {
-        std::vector<std::string> storage = {"hlrad", base};
+        std::vector<std::string> storage = {"hltools rad", base};
         std::vector<char *> argv;
         for (std::string &argument : storage)
             argv.push_back(argument.data());

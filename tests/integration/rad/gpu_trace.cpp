@@ -48,7 +48,7 @@ int main(int argc, char **argv)
     }
     if (map.nodes.empty() || map.models.empty())
     {
-        std::printf("FAIL: '%s' has no bsp tree (run hlbsp first)\n", bsp_path);
+        std::printf("FAIL: '%s' has no bsp tree (run hltools bsp first)\n", bsp_path);
         return 2;
     }
 

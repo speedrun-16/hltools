@@ -2,7 +2,7 @@
 
 #include "data.h"
 
-// the engine exact lightmap extent math shared by hlbsp (ext file) and hlrad
+// the engine exact lightmap extent math shared by bsp (ext file) and rad
 // (lightmap sizing) the product is sequenced one operation at a time through
 // volatile doubles because the goldsrc engine computes it exactly that way, and
 // the tools must agree with the engine about every face's lightmap size

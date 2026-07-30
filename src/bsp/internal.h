@@ -19,7 +19,7 @@
 
 namespace bsp
 {
-    constexpr double bogus_range = 144000; // hlbsp's own; plane windings use 80000
+    constexpr double bogus_range = 144000; // bsp's own; plane windings use 80000
     constexpr double plane_winding_range = 80000;
     constexpr int side_space = 24;
     constexpr int max_edges_per_face = 48; // maxedges
@@ -66,7 +66,7 @@ namespace bsp
         discardable, // contents must not differ between front and back
     };
 
-    // the csg pln record: double precision planes hlbsp works with throughout
+    // the csg pln record: double precision planes bsp works with throughout
     struct plane
     {
         math::vec3v normal;
@@ -84,7 +84,7 @@ namespace bsp
         int planenum = -1;
         int texturenum = 0;
         int contents = 0;      // contents in front of the face
-        int detail_level = 0;  // defined by hlcsg
+        int detail_level = 0;  // defined by csg
         int *output_edges = nullptr; // used by write_draw_nodes
 
         face *original = nullptr; // face on node
@@ -231,7 +231,7 @@ namespace bsp
         std::size_t clipnodes_per_hull[num_hulls] = {};
 
         // sliver faces that could not be subdivided under the lightmap extent
-        // limit and were dropped rather than fail hlrad
+        // limit and were dropped rather than fail rad
         std::size_t unsplittable_faces = 0;
 
         // entity lookup for warnings (parsed once by the driver)

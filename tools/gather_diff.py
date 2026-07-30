@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gather_diff.py - compare two hlrad -dumpgather files (<base>.gather).
+"""gather_diff.py - compare two hltools rad -dumpgather files (<base>.gather).
 
 The dump holds every face's per-style direct-lighting gather results, the
 seam replaced by the GPU backend.

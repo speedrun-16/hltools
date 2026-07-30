@@ -2231,7 +2231,7 @@ namespace rad
         state.lightleafs.clear();
         state.lightarray.clear();
 
-        // note: hlrad must not modify entity data, because a bsp that is
+        // note: rad must not modify entity data, because a bsp that is
         // relit later must produce the same file
     }
 
@@ -3604,7 +3604,7 @@ namespace rad
                             if (abs(test1[0] + s_origin - s_center) > l.lmcache_side || abs(test1[1] + t_origin - t_center) > l.lmcache_side ||
                                 abs(test2[0] + s_origin - s_center) > l.lmcache_side || abs(test2[1] + t_origin - t_center) > l.lmcache_side)
                             {
-                                logging::warn("HLRAD_AVOIDWALLBLEED: internal error.");
+                                logging::warn("rad avoid wall bleed: internal error");
                                 continue;
                             }
                             int wallflags1 = sample_wallflags[(test1[0] + s_origin - s_center + l.lmcache_side) + (2 * l.lmcache_side + 1) * (test1[1] + t_origin - t_center + l.lmcache_side)];

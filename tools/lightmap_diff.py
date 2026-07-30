@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lightmap_diff.py - compare lightmaps between two GoldSrc (BSP v30) files.
 
-Used to verify that HLRAD optimizations do not change the compiled lightmaps.
+Used to verify that RAD optimizations do not change the compiled lightmaps.
 
 Usage:
     python lightmap_diff.py old.bsp new.bsp [--png-dir DIR] [--top N] [--quiet]

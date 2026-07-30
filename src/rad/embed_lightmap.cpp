@@ -629,7 +629,7 @@ namespace rad
         }
 
         // the texinfo index encoded in a "?_radnnnnn" texture name, or -1 if
-        // the texture was not created by hlrad
+        // the texture was not created by rad
         int parse_implicit_texinfo_from_texture(const rad_state &state, int miptex)
         {
             const format::map_data &map = *state.map;
@@ -666,7 +666,7 @@ namespace rad
         }
     }
 
-    // removes all "?_rad*" textures created by a previous hlrad run; does
+    // removes all "?_rad*" textures created by a previous rad run; does
     // nothing when the map has none
     void delete_embedded_lightmaps(rad_state &state)
     {
@@ -722,7 +722,7 @@ namespace rad
                 }
                 if (parse_implicit_texinfo_from_texture(state, info->miptex) == -1)
                 {
-                    break; // not added by hlrad; must not remove this texinfo
+                    break; // not added by rad; must not remove this texinfo
                 }
                 countremovedtexinfos++;
             }
@@ -801,7 +801,7 @@ namespace rad
 
         if (map.lighting.empty())
         {
-            // hlrad hasn't run
+            // rad hasn't run
             return;
         }
         if (map.textures.empty())
@@ -811,7 +811,7 @@ namespace rad
         }
         if (state.options.notextures)
         {
-            // hlrad didn't load the wad files
+            // rad didn't load the wad files
             return;
         }
 
@@ -1285,7 +1285,7 @@ namespace rad
             miptex->name[15] = '\0';
             if ((int)newtextures.size() >= radtextures_max)
             {
-                err::fatal("the number of textures created by hlrad has exceeded its internal limit(%d).", (int)radtextures_max);
+                err::fatal("the number of textures created by hltools rad has exceeded its internal limit(%d).", (int)radtextures_max);
             }
             newtextures.emplace_back((byte *)miptex, (byte *)miptex + miptexsize);
             count++;

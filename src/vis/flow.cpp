@@ -13,7 +13,7 @@
 
 #if defined(_M_X64) || defined(_M_AMD64) || defined(__SSE2__) \
     || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define HLVIS_SSE2 1
+#define HLTOOLS_VIS_SSE2 1
 #include <emmintrin.h>
 #endif
 
@@ -51,7 +51,7 @@ namespace vis
             stack->freewindings[i] = 1;
         }
 
-#if HLVIS_SSE2
+#if HLTOOLS_VIS_SSE2
         // plane distances for points[0..3] (aos, 12 byte stride) evaluated
         // per lane in exactly the scalar order ((x*nx + y*ny) + z*nz) - dist,
         // so the results are bit identical to the scalar loop; the three
@@ -100,7 +100,7 @@ namespace vis
                 err::fatal("winding with too many sides");
 
             int i = 0;
-#if HLVIS_SSE2
+#if HLTOOLS_VIS_SSE2
             {
                 const __m128 eps = _mm_set1_ps((float)on_epsilon);
                 const __m128 negeps = _mm_set1_ps(-(float)on_epsilon);
@@ -559,6 +559,6 @@ namespace vis
 
     void max_dist_vis(vis_state &, int)
     {
-        err::fatal("-maxdistance is not implemented in hlvis yet");
+        err::fatal("-maxdistance is not implemented in hltools vis yet");
     }
 }

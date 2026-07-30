@@ -340,9 +340,9 @@ namespace bsp
                 //
                 // such a face cannot be made to fit a lightmap: control only
                 // reaches here when the extent is already past subdivide_size,
-                // and hlrad counts luxels over the grid (ceil(max/16) -
+                // and rad counts luxels over the grid (ceil(max/16) -
                 // floor(min/16)), so even an extent equal to the limit can
-                // straddle one cell too many. left in, it reaches hlrad with
+                // straddle one cell too many. left in, it reaches rad with
                 // extents past max_surface_extent and kills the compile with
                 // "Bad surface extents". its area is negligible, so drop it;
                 // copy_faces_to_node skips discardable faces.

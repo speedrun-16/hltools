@@ -62,7 +62,7 @@ namespace decompile
             return nullptr;
         }
 
-        // hlcsg and the map parser derive brush contents from a texture name's
+        // csg and the map parser derive brush contents from a texture name's
         // leading characters, so an ordinary material whose name happens to
         // begin with one of these would silently become sky, clip, an origin
         // brush and so on. source material names collide with this more often

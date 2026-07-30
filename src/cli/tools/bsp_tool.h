@@ -7,6 +7,6 @@ namespace tools
 {
     bsp::bsp_options parse_bsp_options(const cli::args &args);
 
-    // the hlbsp main body
+    // the hltools bsp command body
     int run_bsp_tool(int argc, char **argv);
 }

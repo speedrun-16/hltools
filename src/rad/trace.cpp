@@ -160,7 +160,7 @@ namespace rad
     }
 
     // iterative version of test_line_r this is the single hottest function of
-    // hlrad (it runs once per sample+visible light pair, billions of times on a
+    // rad (it runs once per sample+visible light pair, billions of times on a
     // normal map), so the recursion is flattened into an explicit segment
     // stack behavior (traversal order, epsilon logic, linecontent state) is
     // identical to test_line_r; the rare "segment lies in the node plane" case

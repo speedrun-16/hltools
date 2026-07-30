@@ -489,7 +489,7 @@ namespace csg
             textures.i32(-1);
 
         // runtime loaded textures keep only a zeroed header in the bsp; their
-        // full lump data goes into the <map>wa_ temp wad for hlrad the wad3
+        // full lump data goes into the <map>wa_ temp wad for rad the wad3
         // header is 12 bytes ("wad3", lump count, info table offset) followed
         // by the lump data and a 32 byte info record per lump
         std::vector<byte> wad_infos;

@@ -175,7 +175,7 @@ def build_map():
 
 def miptex_bytes(name):
     # a 16 by 16 texture with all four mip levels and a full palette of 256 colors
-    # palette (hlrad loads the pixels and requires the palette block)
+    # palette (rad loads the pixels and requires the palette block)
     data = bytearray(40)
     data[: len(name)] = name.encode("ascii")
     struct.pack_into("<6i", data, 16, 16, 16, 40, 296, 360, 376)

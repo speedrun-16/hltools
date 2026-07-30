@@ -30,7 +30,7 @@ namespace csg
         std::string wad_value;
 
         // the <map>wa_ temp wad: full lump data of every runtime loaded
-        // texture, which hlrad reads to light textured surfaces
+        // texture, which rad reads to light textured surfaces
         std::vector<byte> temp_wad;
     };
 

@@ -13,6 +13,6 @@ namespace tools
     rad::rad_options parse_rad_options(const cli::args &args, int argc, char **argv,
                                        const std::string &base);
 
-    // the hlrad main body
+    // the hltools rad command body
     int run_rad_tool(int argc, char **argv);
 }

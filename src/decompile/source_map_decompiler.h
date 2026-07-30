@@ -76,7 +76,7 @@ namespace decompile
         // gives their faces constant-white fullbright lightmaps.
         std::size_t unlit_materials = 0;
         // engine textures the map names (NULL/CLIP/SKY/...) that no source
-        // material provides. they carry meaning to hlcsg rather than pixels, but
+        // material provides. they carry meaning to csg rather than pixels, but
         // still need a real wad entry, so a tool wad like sdhlt.wad must be on
         // the map's wad list for these to resolve.
         std::set<std::string> engine_textures;

@@ -20,7 +20,7 @@
 
 // disk format emission: draw nodes, leafs, faces, clipnodes (with merging),
 // the used plane and used texinfo compaction, unused texdata removal, and the
-// ext extent file hlrad reads
+// ext extent file rad reads
 
 namespace bsp
 {

@@ -7,10 +7,10 @@
 
 namespace tools
 {
-    // args -> stage options, shared by the standalone tool and hltools compile
+    // args -> stage options, shared by hltools compile and hltools csg
     // buffers the stage's "settings" rows; the caller flushes the table
     csg::csg_options parse_csg_options(const cli::args &args, const std::string &map_path);
 
-    // the hlcsg main body
+    // the hltools csg command body
     int run_csg_tool(int argc, char **argv);
 }

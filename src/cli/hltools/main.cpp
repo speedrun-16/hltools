@@ -15,8 +15,7 @@
 #include "../tools/model_tool.h"
 #include "compile.h"
 
-// hltools: single binary goldsrc toolkit dispatches to subcommands; the
-// per stage commands are the same code the hlcsg/hlbsp/hlvis/hlrad shims run
+// hltools: single binary goldsrc toolkit dispatches to subcommands
 
 namespace
 {

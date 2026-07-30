@@ -275,7 +275,7 @@ namespace math
             return side_on;
         }
 
-        // clips to the front side in place, the hlbsp only reference
+        // clips to the front side in place, the bsp only reference
         // clip(split, keepon) variant: keepon keeps a winding lying entirely on
         // the plane returns false when the winding is clipped away
         bool clip_in_place(const vec3<T> &normal, T dist, bool keepon)
@@ -357,7 +357,7 @@ namespace math
             split,
         };
 
-        // divides by a plane without changing this winding, the hlbsp only
+        // divides by a plane without changing this winding, the bsp only
         // reference divide a winding lying entirely on the plane goes to the
         // side its summed point distances lean toward, and a split whose front
         // or back half degenerates collapses back to a whole side result
