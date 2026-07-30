@@ -433,7 +433,7 @@ namespace decompile
                     result.skipped_sides++;
                     continue;
                 }
-                for (std::size_t p = 0; p < w.size(); p++)
+                for (int p = 0; p < w.size(); p++)
                 {
                     vec3 point = w[p] + model_origin;
                     lo.x = std::min(lo.x, point.x);
