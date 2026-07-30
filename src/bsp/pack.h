@@ -24,10 +24,10 @@ namespace bsp
         std::string res_path;
     };
 
-    // Copies a compiled BSP and every discoverable external dependency into
-    // output_root using the same paths they have below the game directory.
-    // maps/<name>.res is generated beside the packed BSP.
-    bool pack_map(const std::string &bsp_path, const std::string &output_root,
+    // copies a compiled bsp and every discoverable external dependency using
+    // game relative paths; a .zip output creates an archive, otherwise a folder
+    // maps/<name>.res is generated beside the packed bsp
+    bool pack_map(const std::string &bsp_path, const std::string &output,
                   const pack_options &options, pack_result &out,
                   std::string *error = nullptr);
 }

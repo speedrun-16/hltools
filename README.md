@@ -444,10 +444,12 @@ The report includes completed compiler stages, entities, embedded and external t
 
 ```text
 hltools bsp pack <map.bsp> <output-dir> [options]
+hltools bsp pack <map.bsp> <output.zip> [options]
 ```
 
-Builds a distributable folder rooted like a GoldSrc game directory. The BSP is
-written to `maps/`, referenced assets retain paths such as `models/`, `sprites/`,
+Builds a distributable folder rooted like a GoldSrc game directory. When the
+output path ends in `.zip`, it writes one ZIP archive instead. The BSP is written
+to `maps/`, referenced assets retain paths such as `models/`, `sprites/`,
 `sound/`, and `gfx/env/`, and `maps/<map>.res` lists the files using the plain
 GoldSrc resource-list format.
 
@@ -460,7 +462,7 @@ merged as authoritative hand-declared dependencies.
 |---|---|
 | `-game <dir>` | Source game directory. Inferred when the input BSP is inside its `maps` directory |
 | `-base <dir>` | Installed base content to recognize but exclude from the package and `.res`; repeatable. Sibling roots such as `cstrike` and `valve` are inferred when available |
-| `-force` | Overwrite files already present below the output directory |
+| `-force` | Overwrite files already present below the output directory or replace an existing ZIP |
 | `-strict` | Fail without writing the package if any referenced resource is missing |
 
 ### `wad`

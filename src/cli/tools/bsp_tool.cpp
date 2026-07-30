@@ -48,7 +48,7 @@ namespace tools
                 "usage\n"
                 "  hltools bsp [options] <map>\n"
                 "  hltools bsp info <map[.bsp]>\n"
-                "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
+                "  hltools bsp pack <map.bsp> <output-dir|output.zip> [options]\n"
                 "\n"
                 "  builds the bsp trees for all four hulls from csg's plane lists,\n"
                 "  fills the outside, fixes t-junctions, and writes the portal file.\n"
@@ -81,10 +81,11 @@ namespace tools
             logging::console(
                 "usage\n"
                 "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
+                "  hltools bsp pack <map.bsp> <output.zip> [options]\n"
                 "\n"
-                "  copies the BSP and its external resources below <output-dir>,\n"
-                "  preserving game-relative paths such as maps/, models/, sound/,\n"
-                "  sprites/, and gfx/env/. Also writes maps/<map>.res.\n"
+                "  packages the BSP and its external resources with game-relative\n"
+                "  paths such as maps/, models/, sound/, sprites/, and gfx/env/.\n"
+                "  also writes maps/<map>.res.\n"
                 "\n"
                 "options\n"
                 "  -game <dir>  source game directory; inferred when the BSP is\n"
@@ -201,6 +202,9 @@ namespace tools
                 print_pack_help();
                 return 1;
             }
+            const bool zip =
+                str::iequals(stdfs::path(positional[1]).extension().string().c_str(),
+                             ".zip");
 
             std::string source = fs::with_extension(positional[0], ".bsp");
             if (options.game_dir.empty())
@@ -225,11 +229,17 @@ namespace tools
                 return 1;
             }
 
-            logging::console(
-                "packed %zu resource(s) to %s (%zu copied, %zu already in place)\n"
-                "wrote %s\n",
-                result.resources.size(), positional[1].c_str(), result.copied,
-                result.unchanged, result.res_path.c_str());
+            if (zip)
+                logging::console(
+                    "packed %zu resource(s) to %s\nincluded %s\n",
+                    result.resources.size(), positional[1].c_str(),
+                    result.res_path.c_str());
+            else
+                logging::console(
+                    "packed %zu resource(s) to %s (%zu copied, %zu already in place)\n"
+                    "wrote %s\n",
+                    result.resources.size(), positional[1].c_str(), result.copied,
+                    result.unchanged, result.res_path.c_str());
             if (!result.provided_by_base.empty())
                 logging::console(
                     "%zu referenced resource(s) are provided by base content\n",

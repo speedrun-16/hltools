@@ -10,6 +10,7 @@
 #include "format/bsp/entity_lump.h"
 #include "format/bsp/file.h"
 #include "format/miptex/types.h"
+#include "format/zip/archive.h"
 #include "support/scratch.h"
 #include "support/test.h"
 
@@ -133,7 +134,46 @@ suite("unit.bsp.pack")
         expect(text.find("gfx/env/custom/skyup.tga\r\n") != std::string::npos);
         expect(text.find("models/missing.mdl") == std::string::npos);
 
+        stdfs::path zip_output = root / "package.zip";
+        bsp::pack_result zip_result;
+        require(bsp::pack_map(
+            map_path.string(), zip_output.string(), options, zip_result, &error));
+        expect(fs::exists(zip_output.string()));
+        expect(zip_result.res_path == "maps/probe.res");
+
+        std::vector<byte> archive;
+        require(fs::read_all(zip_output.string(), archive));
+        std::vector<byte> zip_res;
+        require(format::read_zip_entry(
+            archive, "maps/probe.res", zip_res, &error));
+        std::string zip_res_text(zip_res.begin(), zip_res.end());
+        expect(zip_res_text == text);
+
+        std::vector<byte> zip_model;
+        require(format::read_zip_entry(
+            archive, "models/prop.mdl", zip_model, &error));
+        expect_false(format::read_zip_entry(
+            archive, "models/stock.mdl", zip_model));
+
+        bsp::pack_result existing_zip_result;
+        expect_false(bsp::pack_map(
+            map_path.string(), zip_output.string(), options,
+            existing_zip_result, &error));
+        expect(error.find("already exists") != std::string::npos);
+        options.force = true;
+        require(bsp::pack_map(
+            map_path.string(), zip_output.string(), options,
+            existing_zip_result, &error));
+        options.force = false;
+
         options.strict = true;
+        bsp::pack_result strict_zip_result;
+        stdfs::path strict_zip = root / "strict.zip";
+        expect_false(bsp::pack_map(
+            map_path.string(), strict_zip.string(), options,
+            strict_zip_result, &error));
+        expect_false(fs::exists(strict_zip.string()));
+
         bsp::pack_result strict_result;
         expect_false(bsp::pack_map(
             map_path.string(), (root / "strict").string(), options,
