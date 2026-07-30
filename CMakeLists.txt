@@ -54,7 +54,7 @@ endfunction()
 
 # version + short git commit stamped into the tool banner (captured at configure
 # time; reconfigure to refresh the hash)
-set(HLTOOLS_VERSION "1.22.0")
+set(HLTOOLS_VERSION "1.23.0")
 execute_process(
     COMMAND git rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
