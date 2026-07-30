@@ -10,6 +10,7 @@
 #include "format/bsp/data.h"
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
+#include "compile_parameters.h"
 
 namespace tools
 {
@@ -37,7 +38,7 @@ namespace tools
         {
             logging::console(
                 "usage\n"
-                "  hltools vis [options] <map>        (standalone: hlvis)\n"
+                "  hltools vis [options] <map>\n"
                 "\n"
                 "  computes the potentially visible set: which leaves can see which,\n"
                 "  so the engine only renders (and rad only bounces) what matters.\n"
@@ -54,17 +55,16 @@ namespace tools
 
     int run_vis_tool(int argc, char **argv)
     {
-        cli::args args(argc, argv);
-        const bool want_help = args.has("-h") || args.has("-help") || args.has("--help");
-        if (args.empty() || args.map_name().empty() || want_help)
+        cli::args command_line(argc, argv);
+        const bool want_help = command_line.has("-h")
+            || command_line.has("-help") || command_line.has("--help");
+        if (command_line.empty() || command_line.map_name().empty() || want_help)
         {
             print_vis_help();
             return want_help ? 0 : 1;
         }
 
-        threads::set_count(args.int_value("-threads", 0));
-
-        std::string base = fs::strip_extension(args.map_name());
+        std::string base = fs::strip_extension(command_line.map_name());
         std::string bsp_path = base + ".bsp";
         std::string portal_path = base + ".prt";
 
@@ -75,6 +75,13 @@ namespace tools
         if (!format::bsp_file::load(bsp_path, map))
             err::fatal("failed to load bsp '%s'", bsp_path.c_str());
 
+        const tools::compile_parameters parameters =
+            compile_parameters_from_bsp(map);
+        staged_arguments arguments(
+            argc, argv, parameters, cli::compiler_stage::vis);
+        cli::args args(arguments.argc(), arguments.argv.data());
+
+        threads::set_count(args.int_value("-threads", 0));
         logging::setting("threads", std::to_string(threads::count()).c_str(), "varies",
                          args.has("-threads"));
         vis::vis_options options = parse_vis_options(args, portal_path);

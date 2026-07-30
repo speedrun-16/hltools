@@ -25,6 +25,11 @@ namespace csg
 
         // -nullfile: classnames and targetnames whose faces turn invisible
         std::set<std::string> invisible_items;
+
+        // true when this invocation writes a final bsp and should remove
+        // info_compile_parameters; a traditional csg stage leaves it false so
+        // later stages can consume their keys from the intermediate bsp
+        bool compile_parameters_consumed = false;
     };
 
     struct csg_result

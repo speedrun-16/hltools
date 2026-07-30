@@ -13,7 +13,7 @@
 // compiled bsp). producers build entities and brushes programmatically and
 // serialize once with write(); nothing outside this module knows the .map text
 // syntax. trenchbroom groups are supported through their func_group convention
-// (_tb_type/_tb_name/_tb_id keyvalues), which hlcsg merges into the world, so
+// (_tb_type/_tb_name/_tb_id keyvalues), which csg merges into the world, so
 // grouping never affects a compile.
 
 namespace format
@@ -105,4 +105,22 @@ namespace format
         std::vector<std::pair<int, std::size_t>> groups_; // id -> entity index
         int next_group_id_ = 0;
     };
+
+    // a top level entity located in existing map source; only its depth one
+    // key/value pairs are parsed and brushes remain untouched in the source text
+    struct map_source_entity
+    {
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        entity keyvalues;
+    };
+
+    // source preserving map editing helpers allow compiler metadata to change
+    // without parsing and rewriting brushes, comments or layout
+    std::vector<map_source_entity> parse_map_source_entities(
+        const std::string &text);
+    void erase_map_entities(
+        std::string &text,
+        std::initializer_list<const char *> classnames);
+    void append_map_entity(std::string &text, const entity &keyvalues);
 }

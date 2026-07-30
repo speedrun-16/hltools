@@ -14,6 +14,7 @@
 #include "../../common/threads.h"
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
+#include "compile_parameters.h"
 
 namespace stdfs = std::filesystem;
 
@@ -303,7 +304,7 @@ namespace tools
         {
             logging::console(
                 "usage\n"
-                "  hltools rad [options] <map>        (standalone: hlrad)\n"
+                "  hltools rad [options] <map>\n"
                 "  hltools rad -h                     show this help\n"
                 "\n"
                 "  radiosity lighting: direct light gathering, patch-to-patch bounces,\n"
@@ -474,7 +475,6 @@ namespace tools
                 "  Texture names beginning %%<0..255> also set a per-face minlight.\n"
                 "\n"
                 "recognized but unavailable\n"
-                "  info_compile_parameters is rejected; use command-line options.\n"
                 "  env_static and zhlt_studioshadow request studio-model shadows, which\n"
                 "  are not implemented yet; -nostudioshadow explicitly ignores those shadows.\n");
         }
@@ -482,30 +482,41 @@ namespace tools
 
     int run_rad_tool(int argc, char **argv)
     {
-        cli::args args(argc, argv);
-        const bool want_help = args.has("-h") || args.has("-help") || args.has("--help");
-        if (args.empty() || args.map_name().empty() || want_help)
+        cli::args command_line(argc, argv);
+        const bool want_help = command_line.has("-h")
+            || command_line.has("-help") || command_line.has("--help");
+        if (command_line.empty() || command_line.map_name().empty() || want_help)
         {
             print_rad_help();
             return want_help ? 0 : 1;
         }
 
-        std::string base = fs::strip_extension(fs::with_extension(args.map_name(), ".bsp"));
+        std::string base = fs::strip_extension(
+            fs::with_extension(command_line.map_name(), ".bsp"));
         logging::open_stage_log(base, "rad");
         logging::banner("rad");
+
+        std::string bsp_path = base + ".bsp";
+        format::map_data map;
+        if (!format::bsp_file::load(bsp_path, map))
+            err::fatal("could not load bsp '%s'", bsp_path.c_str());
+
+        const tools::compile_parameters parameters =
+            compile_parameters_from_bsp(map);
+        staged_arguments arguments(
+            argc, argv, parameters, cli::compiler_stage::rad);
+        cli::args args(arguments.argc(), arguments.argv.data());
 
         if (args.has("-threads"))
             threads::set_count(args.int_value("-threads", 0));
 
         logging::setting("threads", std::to_string(threads::count()).c_str(), "varies",
                          args.has("-threads"));
-        rad::rad_options options = parse_rad_options(args, argc, argv, base);
+        rad::rad_options options = parse_rad_options(
+            args, arguments.argc(), arguments.argv.data(), base);
         logging::flush_settings();
 
-        std::string bsp_path = base + ".bsp";
-        format::map_data map;
-        if (!format::bsp_file::load(bsp_path, map))
-            err::fatal("could not load bsp '%s'", bsp_path.c_str());
+        erase_runtime_compile_parameters(map);
 
         auto start = std::chrono::steady_clock::now();
         int alloc_block_pages = -1;

@@ -14,6 +14,7 @@
 #include "bsp/pack.h"
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
+#include "compile_parameters.h"
 
 namespace stdfs = std::filesystem;
 
@@ -44,7 +45,7 @@ namespace tools
         {
             logging::console(
                 "usage\n"
-                "  hltools bsp [options] <map>        (standalone: hlbsp)\n"
+                "  hltools bsp [options] <map>\n"
                 "  hltools bsp pack <map.bsp> <output-dir> [options]\n"
                 "\n"
                 "  builds the bsp trees for all four hulls from csg's plane lists,\n"
@@ -245,30 +246,36 @@ namespace tools
         if (argc >= 2 && str::iequals(argv[1], "pack"))
             return run_pack(argc, argv);
 
-        cli::args args(argc, argv);
-        const bool want_help = args.has("-h") || args.has("-help") || args.has("--help");
-        if (args.empty() || args.map_name().empty() || want_help)
+        cli::args command_line(argc, argv);
+        const bool want_help = command_line.has("-h")
+            || command_line.has("-help") || command_line.has("--help");
+        if (command_line.empty() || command_line.map_name().empty() || want_help)
         {
             print_bsp_help();
             return want_help ? 0 : 1;
         }
 
-        threads::set_count(args.int_value("-threads", 0));
-
-        std::string base = fs::strip_extension(fs::with_extension(args.map_name(), ".bsp"));
+        std::string base = fs::strip_extension(
+            fs::with_extension(command_line.map_name(), ".bsp"));
         logging::open_stage_log(base, "bsp");
         logging::banner("bsp");
-
-        bsp::bsp_options options = parse_bsp_options(args);
-
-        logging::setting("threads", std::to_string(threads::count()).c_str(), "varies",
-                         args.has("-threads"));
-        logging::flush_settings();
 
         std::string bsp_path = base + ".bsp";
         format::map_data map;
         if (!format::bsp_file::load(bsp_path, map))
             err::fatal("could not load bsp '%s'", bsp_path.c_str());
+
+        const tools::compile_parameters parameters =
+            compile_parameters_from_bsp(map);
+        staged_arguments arguments(
+            argc, argv, parameters, cli::compiler_stage::bsp);
+        cli::args args(arguments.argc(), arguments.argv.data());
+
+        threads::set_count(args.int_value("-threads", 0));
+        bsp::bsp_options options = parse_bsp_options(args);
+        logging::setting("threads", std::to_string(threads::count()).c_str(), "varies",
+                         args.has("-threads"));
+        logging::flush_settings();
 
         auto start = std::chrono::steady_clock::now();
         bsp::run_bsp(map, base, options);

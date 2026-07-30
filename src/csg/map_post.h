@@ -24,6 +24,7 @@ namespace csg
         std::set<std::string> invisible_items;
 
         brush_build_options brush;
+        bool compile_parameters_consumed = false;
     };
 
     void post_process_map(map_source &map,

@@ -10,6 +10,7 @@
 #include "../common/filesystem.h"
 #include "../common/log.h"
 #include "../common/progress.h"
+#include "../common/string_util.h"
 #include "../common/threads.h"
 #include "compress.h"
 #include "internal.h"
@@ -32,13 +33,6 @@ namespace rad
             {
                 format::entity *mapent = &state.entities[i];
 
-                if (!strcmp(mapent->value("classname"), "info_compile_parameters"))
-                {
-                    // entity based compiler settings are unsupported; fail
-                    // loudly instead of compiling with different settings
-                    err::fatal("info_compile_parameters entities are not supported by this compiler; "
-                               "remove the entity and pass the settings on the command line");
-                }
                 if (!strncmp(mapent->value("classname"), "light", 5) && *mapent->value("_tex"))
                 {
                     mapent->set("convertto", mapent->value("classname"));
@@ -792,7 +786,8 @@ namespace rad
     }
 
     bool run_rad(format::map_data &map, const std::string &base_path, const rad_options &options,
-                 int *alloc_block_pages)
+                 int *alloc_block_pages,
+                 std::vector<format::texlight> *used_texlights)
     {
         if (alloc_block_pages)
         {
@@ -823,6 +818,41 @@ namespace rad
             read_light_file(state, state.options.rad_files[i].c_str());
         }
         read_info_tex_and_minlights(state);
+
+        if (used_texlights)
+        {
+            used_texlights->clear();
+            for (const format::dface_t &face : map.faces)
+            {
+                const char *texture = texture_by_number(state, face.texinfo);
+                if (!texture[0])
+                    continue;
+                bool already_added = false;
+                for (const format::texlight &existing : *used_texlights)
+                {
+                    if (str::iequals(existing.name.c_str(), texture))
+                    {
+                        already_added = true;
+                        break;
+                    }
+                }
+                if (already_added)
+                    continue;
+                for (const rad_texlight &candidate : state.texlights)
+                {
+                    if (!str::iequals(candidate.name.c_str(), texture))
+                        continue;
+                    format::texlight light;
+                    light.name = texture;
+                    light.value[0] = (float)candidate.value[0];
+                    light.value[1] = (float)candidate.value[1];
+                    light.value[2] = (float)candidate.value[2];
+                    light.source = candidate.source;
+                    used_texlights->push_back(std::move(light));
+                    break;
+                }
+            }
+        }
 
         unsigned generic_texlights = 0;
         for (const rad_texlight &texlight : state.texlights)

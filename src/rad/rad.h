@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "format/bsp/data.h"
+#include "format/rad/texlights.h"
 #include "../math/vector.h"
 
 // the rad stage: radiosity lighting reads a compiled bsp (after csg, bsp and
@@ -144,5 +145,6 @@ namespace rad
     // lights the map in place returns false when the lightmap atlas budget
     // overflowed and lighting was skipped (the map would not load in game)
     bool run_rad(format::map_data &map, const std::string &base_path, const rad_options &options,
-                 int *alloc_block_pages = nullptr);
+                 int *alloc_block_pages = nullptr,
+                 std::vector<format::texlight> *used_texlights = nullptr);
 }

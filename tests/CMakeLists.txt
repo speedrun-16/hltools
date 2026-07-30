@@ -65,9 +65,17 @@ add_hltools_unit(unit_common
     LIBRARIES hltools_common
     LABEL unit.common)
 
+add_hltools_unit(unit_cli
+    PREFIX "unit.cli."
+    SOURCES
+        unit/cli/compile_parameters.cpp
+    LIBRARIES hltools_compile_parameters
+    LABEL unit.cli)
+
 add_hltools_unit(unit_format
     PREFIX "unit.format."
     SOURCES
+        unit/format/bsp_extensions.cpp
         unit/format/entity_lump.cpp
         unit/format/goldsrc_mdl.cpp
         unit/format/quantize.cpp
@@ -124,7 +132,7 @@ add_hltools_unit(unit_rad
         unit/rad/options.cpp
         unit/rad/unlit_textures.cpp
         ../src/cli/tools/rad_tool.cpp
-    LIBRARIES hltools_rad
+    LIBRARIES hltools_rad hltools_compile_parameters
     LABEL unit.rad)
 
 add_hltools_unit(entity_csg

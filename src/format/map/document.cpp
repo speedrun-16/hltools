@@ -1,9 +1,11 @@
 #include "document.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 
+#include "common/string_util.h"
 #include "math/vector.h"
 
 namespace format
@@ -58,6 +60,93 @@ namespace format
                 text += "\" \""; text += escape_value(pair.second);
                 text += "\"\n";
             }
+        }
+
+        void skip_line(const std::string &text, std::size_t &position)
+        {
+            while (position < text.size() && text[position] != '\n')
+                position++;
+        }
+
+        void skip_space_and_comments(
+            const std::string &text, std::size_t &position, std::size_t end)
+        {
+            for (;;)
+            {
+                while (position < end
+                       && std::isspace((unsigned char)text[position]))
+                    position++;
+                if (position >= end)
+                    return;
+                if (text[position] == ';' || text[position] == '#')
+                {
+                    skip_line(text, position);
+                    continue;
+                }
+                if (text[position] == '/' && position + 1 < end
+                    && text[position + 1] == '/')
+                {
+                    skip_line(text, position);
+                    continue;
+                }
+                return;
+            }
+        }
+
+        bool read_quoted(
+            const std::string &text, std::size_t &position, std::size_t end,
+            std::string &out)
+        {
+            if (position >= end || text[position] != '"')
+                return false;
+            position++;
+            const std::size_t begin = position;
+            while (position < end && text[position] != '"')
+                position++;
+            out.assign(text, begin, position - begin);
+            if (position < end)
+                position++;
+            return true;
+        }
+
+        entity read_map_entity_pairs(
+            const std::string &text, std::size_t begin, std::size_t end)
+        {
+            entity keyvalues;
+            std::size_t position = begin + 1;
+            int depth = 1;
+            while (position < end && depth > 0)
+            {
+                skip_space_and_comments(text, position, end);
+                if (position >= end)
+                    break;
+                if (text[position] == '{')
+                {
+                    depth++;
+                    position++;
+                    continue;
+                }
+                if (text[position] == '}')
+                {
+                    depth--;
+                    position++;
+                    continue;
+                }
+                if (depth != 1 || text[position] != '"')
+                {
+                    position++;
+                    continue;
+                }
+                std::string key;
+                std::string value;
+                if (!read_quoted(text, position, end, key))
+                    continue;
+                skip_space_and_comments(text, position, end);
+                if (!read_quoted(text, position, end, value))
+                    continue;
+                keyvalues.append(std::move(key), std::move(value));
+            }
+            return keyvalues;
         }
 
         void append_brush(std::string &text, const map_brush &brush)
@@ -276,5 +365,98 @@ namespace format
             text += "}\n";
         }
         return text;
+    }
+
+    std::vector<map_source_entity> parse_map_source_entities(
+        const std::string &text)
+    {
+        std::vector<map_source_entity> out;
+        std::size_t position = 0;
+        while (position < text.size())
+        {
+            skip_space_and_comments(text, position, text.size());
+            if (position >= text.size())
+                break;
+            if (text[position] != '{')
+            {
+                position++;
+                continue;
+            }
+
+            const std::size_t begin = position;
+            int depth = 0;
+            bool in_quote = false;
+            while (position < text.size())
+            {
+                const char c = text[position];
+                if (!in_quote && (c == ';' || c == '#'))
+                {
+                    skip_line(text, position);
+                    continue;
+                }
+                if (!in_quote && c == '/' && position + 1 < text.size()
+                    && text[position + 1] == '/')
+                {
+                    skip_line(text, position);
+                    continue;
+                }
+                if (c == '"')
+                    in_quote = !in_quote;
+                else if (!in_quote && c == '{')
+                    depth++;
+                else if (!in_quote && c == '}' && --depth == 0)
+                {
+                    position++;
+                    out.push_back({
+                        begin, position,
+                        read_map_entity_pairs(text, begin, position)
+                    });
+                    break;
+                }
+                position++;
+            }
+        }
+        return out;
+    }
+
+    void erase_map_entities(
+        std::string &text,
+        std::initializer_list<const char *> classnames)
+    {
+        std::string edited;
+        std::size_t copied = 0;
+        for (const map_source_entity &source :
+             parse_map_source_entities(text))
+        {
+            bool erase = false;
+            const char *classname = source.keyvalues.value("classname");
+            for (const char *candidate : classnames)
+            {
+                if (str::iequals(classname, candidate))
+                {
+                    erase = true;
+                    break;
+                }
+            }
+            if (!erase)
+                continue;
+            edited.append(text, copied, source.begin - copied);
+            copied = source.end;
+        }
+        if (copied == 0)
+            return;
+        edited.append(text, copied, text.size() - copied);
+        text = std::move(edited);
+    }
+
+    void append_map_entity(std::string &text, const entity &keyvalues)
+    {
+        if (keyvalues.empty())
+            return;
+        if (!text.empty() && text.back() != '\n')
+            text += '\n';
+        text += "{\n";
+        append_entity_pairs(text, keyvalues);
+        text += "}\n";
     }
 }

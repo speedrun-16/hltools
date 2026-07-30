@@ -94,6 +94,8 @@ namespace csg
         post_options.sky_clip = options.sky_clip;
         post_options.invisible_items = options.invisible_items;
         post_options.brush = brush_options;
+        post_options.compile_parameters_consumed =
+            options.compile_parameters_consumed;
         post_process_map(result.map, planes, &result.texinfos, result.hull_shapes, post_options);
         brush_options.hull_shapes = &result.hull_shapes;
 

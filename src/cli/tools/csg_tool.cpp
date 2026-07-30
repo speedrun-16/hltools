@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <utility>
+#include <vector>
 
 #include "../../common/error.h"
 #include "../../common/filesystem.h"
@@ -12,6 +13,7 @@
 #include "format/bsp/file.h"
 #include "../../csg/bsp_output.h"
 #include "../../csg/map_parser.h"
+#include "compile_parameters.h"
 
 namespace tools
 {
@@ -79,7 +81,7 @@ namespace tools
         {
             logging::console(
                 "usage\n"
-                "  hltools csg [options] <map>        (standalone: hlcsg)\n"
+                "  hltools csg [options] <map>\n"
                 "\n"
                 "  carves brushes into renderable geometry, builds the clipping hull\n"
                 "  brushes, and resolves the map's textures from its wads.\n"
@@ -115,17 +117,29 @@ namespace tools
 
     int run_csg_tool(int argc, char **argv)
     {
-        cli::args args(argc, argv);
-        const bool want_help = args.has("-h") || args.has("-help") || args.has("--help");
-        if (args.empty() || args.map_name().empty() || want_help)
+        cli::args command_line(argc, argv);
+        const bool want_help = command_line.has("-h")
+            || command_line.has("-help") || command_line.has("--help");
+        if (command_line.empty() || command_line.map_name().empty() || want_help)
         {
             print_csg_help();
             return want_help ? 0 : 1;
         }
 
+        std::string map_path =
+            fs::with_extension(command_line.map_name(), ".map");
+        std::vector<unsigned char> source_bytes;
+        if (!fs::read_all(map_path, source_bytes))
+            err::fatal("could not read map source '%s'", map_path.c_str());
+        const tools::compile_parameters parameters =
+            compile_parameters_from_map(
+                std::string(source_bytes.begin(), source_bytes.end()));
+        staged_arguments arguments(
+            argc, argv, parameters, cli::compiler_stage::csg);
+        cli::args args(arguments.argc(), arguments.argv.data());
+
         threads::set_count(args.int_value("-threads", 0));
 
-        std::string map_path = fs::with_extension(args.map_name(), ".map");
         std::string base = fs::strip_extension(map_path);
         logging::open_stage_log(base, "csg");
         logging::banner("csg");
@@ -133,6 +147,10 @@ namespace tools
         logging::setting("threads", std::to_string(threads::count()).c_str(), "varies",
                          args.has("-threads"));
         csg::csg_options options = parse_csg_options(args, map_path);
+        // a traditional multi process chain must carry the recipe through its
+        // intermediate bsp; entity only mode writes a final runtime bsp, so it
+        // consumes and removes the metadata immediately
+        options.compile_parameters_consumed = options.brush.only_entities;
         bool optimize_lights = !args.has("-nolightopt");
         logging::flush_settings();
 

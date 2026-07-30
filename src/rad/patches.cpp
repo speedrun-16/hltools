@@ -173,6 +173,15 @@ namespace rad
                     texlight.value[1] = g;
                     texlight.value[2] = b;
                     texlight.source = "info_texlights";
+                    for (auto existing = state.texlights.begin();
+                         existing != state.texlights.end(); ++existing)
+                    {
+                        if (str::iequals(existing->name.c_str(), key))
+                        {
+                            state.texlights.erase(existing);
+                            break;
+                        }
+                    }
                     state.texlights.push_back(texlight);
                 }
                 found_texlights = true;

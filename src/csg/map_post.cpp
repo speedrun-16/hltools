@@ -350,10 +350,18 @@ namespace csg
             map_entity &entity = map.entities[(size_t)entity_num];
             const char *classname = entity.value("classname");
 
-            if (std::strcmp(classname, "info_compile_parameters") == 0)
+            if (str::iequals(classname, "info_compile_parameters"))
             {
-                err::fatal("info_compile_parameters entities are not supported; "
-                           "pass the settings on the command line instead");
+                if (options.compile_parameters_consumed)
+                {
+                    // unified compilation already supplied every stage with
+                    // its defaults; entity only csg also writes a final bsp
+                    delete_hullshape_entity(map, entity_num);
+                    return true;
+                }
+                // individual csg applies csg_* now and carries the remaining
+                // recipe in its intermediate bsp for bsp, vis and rad
+                return false;
             }
 
             entity.origin = math::vec3v{};

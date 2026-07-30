@@ -10,6 +10,7 @@ project(hltools
 )
 
 include(CTest)
+include(FetchContent)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +62,47 @@ add_compile_definitions(
     HLTOOLS_VERSION="${HLTOOLS_VERSION}"
     HLTOOLS_COMMIT="${HLTOOLS_COMMIT}"
 )
+
+# embedded map sources use a standards compliant zip tail; keep libzip and its
+# zlib backend static so the command line tool remains a single file binary
+set(BUILD_SHARED_LIBS OFF)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zlib
+    URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
+    URL_HASH SHA256=17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(zlib)
+if(NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+endif()
+set(ZLIB_FOUND TRUE)
+set(ZLIB_INCLUDE_DIRS "${zlib_SOURCE_DIR};${zlib_BINARY_DIR}")
+set(ZLIB_INCLUDE_DIR "${zlib_SOURCE_DIR};${zlib_BINARY_DIR}")
+set(ZLIB_LIBRARIES zlibstatic)
+set(ZLIB_LIBRARY zlibstatic)
+set(ZLIB_VERSION_STRING "1.3.1")
+
+set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(BUILD_REGRESS OFF CACHE BOOL "" FORCE)
+set(BUILD_OSSFUZZ OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(LIBZIP_DO_INSTALL OFF CACHE BOOL "" FORCE)
+set(ENABLE_BZIP2 OFF CACHE BOOL "" FORCE)
+set(ENABLE_LZMA OFF CACHE BOOL "" FORCE)
+set(ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+set(ENABLE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(ENABLE_GNUTLS OFF CACHE BOOL "" FORCE)
+set(ENABLE_MBEDTLS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libzip
+    URL https://github.com/nih-at/libzip/releases/download/v1.11.4/libzip-1.11.4.tar.gz
+    URL_HASH SHA256=82e9f2f2421f9d7c2466bbc3173cd09595a88ea37db0d559a9d0a2dc60dc722e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(libzip)
 
 if(WIN32)
     enable_language(RC)
@@ -133,6 +175,7 @@ add_library(hltools_format STATIC
     src/format/bsp/lightmap_atlas.cpp
     src/format/bsp/texture_lump.cpp
     src/format/bsp/usage_chart.cpp
+    src/format/zip/archive.cpp
     src/format/image/quantize.cpp
     src/format/map/document.cpp
     src/format/mdl/goldsrc_mdl.cpp
@@ -147,7 +190,16 @@ add_library(hltools_format STATIC
     src/format/wad/archive.cpp
 )
 target_include_directories(hltools_format PUBLIC src)
-target_link_libraries(hltools_format PUBLIC hltools_common)
+target_link_libraries(hltools_format PUBLIC hltools_common zip)
+
+# shared compiler option registry consumers and info_compile_parameters
+# resolution for unified and individual stage commands
+add_library(hltools_compile_parameters STATIC
+    src/cli/tools/compile_parameters.cpp
+)
+target_include_directories(hltools_compile_parameters PUBLIC src)
+target_link_libraries(hltools_compile_parameters
+    PUBLIC hltools_format hltools_common)
 
 # decompile: read only bsp tree reconstruction and valve 220 map writing
 add_library(hltools_decompile STATIC
@@ -181,7 +233,7 @@ target_link_libraries(hltools_vis PUBLIC hltools_format hltools_math hltools_com
 set_target_properties(hltools_vis PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
 add_executable(hlvis src/cli/hlvis/main.cpp src/cli/tools/vis_tool.cpp)
-target_link_libraries(hlvis PRIVATE hltools_vis)
+target_link_libraries(hlvis PRIVATE hltools_vis hltools_compile_parameters)
 add_hltools_windows_version(hlvis "halflife visibility stage compiler")
 set_target_properties(hlvis PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 set_hltools_runtime_subdirectory(hlvis stages)
@@ -204,7 +256,7 @@ target_compile_definitions(hltools_csg PUBLIC HLTOOLS_DOUBLE_PRECISION)
 target_link_libraries(hltools_csg PUBLIC hltools_format hltools_math hltools_common)
 
 add_executable(hlcsg src/cli/hlcsg/main.cpp src/cli/tools/csg_tool.cpp)
-target_link_libraries(hlcsg PRIVATE hltools_csg)
+target_link_libraries(hlcsg PRIVATE hltools_csg hltools_compile_parameters)
 add_hltools_windows_version(hlcsg "halflife csg stage compiler")
 set_hltools_runtime_subdirectory(hlcsg stages)
 
@@ -261,12 +313,12 @@ target_link_libraries(hltools_rad PUBLIC hltools_format hltools_math hltools_com
 set_target_properties(hltools_rad PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
 add_executable(hlbsp src/cli/hlbsp/main.cpp src/cli/tools/bsp_tool.cpp)
-target_link_libraries(hlbsp PRIVATE hltools_bsp)
+target_link_libraries(hlbsp PRIVATE hltools_bsp hltools_compile_parameters)
 add_hltools_windows_version(hlbsp "halflife bsp stage compiler")
 set_hltools_runtime_subdirectory(hlbsp stages)
 
 add_executable(hlrad src/cli/hlrad/main.cpp src/cli/tools/rad_tool.cpp)
-target_link_libraries(hlrad PRIVATE hltools_rad)
+target_link_libraries(hlrad PRIVATE hltools_rad hltools_compile_parameters)
 add_hltools_windows_version(hlrad "halflife radiosity compiler")
 set_hltools_runtime_subdirectory(hlrad stages)
 set_target_properties(hlrad PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
@@ -294,7 +346,6 @@ if(HLTOOLS_GPU)
 endif()
 
 if(HLTOOLS_GPU)
-    include(FetchContent)
     set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_extern")
     FetchContent_Declare(
         vulkan_headers
@@ -375,7 +426,7 @@ add_executable(hltools
     src/cli/tools/model_tool.cpp
 )
 target_link_libraries(hltools PRIVATE hltools_csg hltools_bsp hltools_vis hltools_rad
-    hltools_decompile hltools_model)
+    hltools_decompile hltools_model hltools_compile_parameters)
 add_hltools_windows_version(hltools "${PROJECT_DESCRIPTION}")
 set_target_properties(hltools PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 

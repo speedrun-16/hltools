@@ -12,6 +12,8 @@ namespace format
     // byte identical, which compile_diffpy verifies
     namespace bsp_file
     {
+        constexpr const char *embed_locator_lump = "HLTOOLS_EMBED_LOCATOR";
+
         bool load(const std::string &path, map_data &out);
         bool write(const std::string &path, const map_data &data);
     }

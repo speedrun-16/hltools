@@ -16,6 +16,12 @@
 
 namespace format
 {
+    struct bspx_lump
+    {
+        std::string name;
+        std::vector<byte> data;
+    };
+
     struct map_data
     {
         std::vector<dmodel_t> models;
@@ -34,5 +40,12 @@ namespace format
         std::vector<byte> visibility; // compressed pvs
         std::vector<byte> textures;   // miptex lump (dmiptexlump_t + data)
         std::string entities;         // entity text block
+
+        // optional extension data after the last vanilla lump; bspx is ignored
+        // by the goldsrc engine and the embedded archive is a zip tail addressed
+        // by HLTOOLS_EMBED_LOCATOR rather than stored inside that fixed size
+        // bspx lump, so zip tools can resize it without invalidating bsp metadata
+        std::vector<bspx_lump> bspx;
+        std::vector<byte> embedded_zip;
     };
 }

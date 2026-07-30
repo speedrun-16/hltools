@@ -16,6 +16,7 @@
 #include "../../common/string_util.h"
 #include "../../decompile/map_decompiler.h"
 #include "../../decompile/source_map_decompiler.h"
+#include "format/zip/archive.h"
 #include "format/bsp/data.h"
 #include "format/bsp/file.h"
 #include "format/bsp/texture_lump.h"
@@ -512,6 +513,39 @@ namespace tools
         {
             logging::console("decompile: could not load '%s'\n", positional[0].c_str());
             return 1;
+        }
+
+        if (!map.embedded_zip.empty())
+        {
+            std::vector<unsigned char> source;
+            std::string entry;
+            std::string zip_error;
+            if (!format::read_zip_map(map.embedded_zip, source, &entry,
+                                     &zip_error))
+            {
+                logging::console(
+                    "decompile: embedded source ZIP is invalid (%s); "
+                    "falling back to BSP reconstruction\n",
+                    zip_error.c_str());
+            }
+            else
+            {
+                if (explicit_wad)
+                {
+                    logging::console(
+                        "decompile: embedded MAP found; -wad is not needed "
+                        "and will be ignored\n");
+                }
+                if (!fs::write_all(positional[1], source.data(), source.size()))
+                {
+                    logging::console("decompile: could not write '%s'\n",
+                                     positional[1].c_str());
+                    return 1;
+                }
+                logging::console("wrote %s from embedded source '%s'\n",
+                                 positional[1].c_str(), entry.c_str());
+                return 0;
+            }
         }
 
         std::vector<format::mip_texture> textures;
