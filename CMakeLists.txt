@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(hltools
-    DESCRIPTION "Half-Life map compiler toolchain"
+    DESCRIPTION "halflife map compiler toolchain"
     LANGUAGES CXX
 )
 
@@ -46,7 +46,7 @@ endfunction()
 
 # version + short git commit stamped into the tool banner (captured at configure
 # time; reconfigure to refresh the hash)
-set(HLTOOLS_VERSION "1.0.0")
+set(HLTOOLS_VERSION "1.22.0")
 execute_process(
     COMMAND git rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -61,6 +61,39 @@ add_compile_definitions(
     HLTOOLS_VERSION="${HLTOOLS_VERSION}"
     HLTOOLS_COMMIT="${HLTOOLS_COMMIT}"
 )
+
+if(WIN32)
+    enable_language(RC)
+
+    if(NOT HLTOOLS_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+        message(FATAL_ERROR
+            "HLTOOLS_VERSION must contain three numeric components")
+    endif()
+    set(HLTOOLS_VERSION_MAJOR "${CMAKE_MATCH_1}")
+    set(HLTOOLS_VERSION_MINOR "${CMAKE_MATCH_2}")
+    set(HLTOOLS_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+    function(add_hltools_windows_version target description)
+        set(HLTOOLS_FILE_DESCRIPTION "${description}")
+        set(HLTOOLS_INTERNAL_NAME "${target}")
+        set(HLTOOLS_ORIGINAL_FILENAME "${target}.exe")
+        set(version_resource_dir
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/version")
+        set(version_resource
+            "${version_resource_dir}/${target}_version.rc")
+
+        file(MAKE_DIRECTORY "${version_resource_dir}")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows_version.rc.in"
+            "${version_resource}"
+            @ONLY
+        )
+        target_sources(${target} PRIVATE "${version_resource}")
+    endfunction()
+else()
+    function(add_hltools_windows_version target description)
+    endfunction()
+endif()
 
 if(MSVC)
     add_compile_options(/W3)
@@ -149,6 +182,7 @@ set_target_properties(hltools_vis PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEAS
 
 add_executable(hlvis src/cli/hlvis/main.cpp src/cli/tools/vis_tool.cpp)
 target_link_libraries(hlvis PRIVATE hltools_vis)
+add_hltools_windows_version(hlvis "halflife visibility stage compiler")
 set_target_properties(hlvis PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 set_hltools_runtime_subdirectory(hlvis stages)
 
@@ -171,6 +205,7 @@ target_link_libraries(hltools_csg PUBLIC hltools_format hltools_math hltools_com
 
 add_executable(hlcsg src/cli/hlcsg/main.cpp src/cli/tools/csg_tool.cpp)
 target_link_libraries(hlcsg PRIVATE hltools_csg)
+add_hltools_windows_version(hlcsg "halflife csg stage compiler")
 set_hltools_runtime_subdirectory(hlcsg stages)
 
 # bsp: solid tree build, portals, fill, tjunc, edges, and bsp writing
@@ -227,10 +262,12 @@ set_target_properties(hltools_rad PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEAS
 
 add_executable(hlbsp src/cli/hlbsp/main.cpp src/cli/tools/bsp_tool.cpp)
 target_link_libraries(hlbsp PRIVATE hltools_bsp)
+add_hltools_windows_version(hlbsp "halflife bsp stage compiler")
 set_hltools_runtime_subdirectory(hlbsp stages)
 
 add_executable(hlrad src/cli/hlrad/main.cpp src/cli/tools/rad_tool.cpp)
 target_link_libraries(hlrad PRIVATE hltools_rad)
+add_hltools_windows_version(hlrad "halflife radiosity compiler")
 set_hltools_runtime_subdirectory(hlrad stages)
 set_target_properties(hlrad PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
@@ -339,6 +376,7 @@ add_executable(hltools
 )
 target_link_libraries(hltools PRIVATE hltools_csg hltools_bsp hltools_vis hltools_rad
     hltools_decompile hltools_model)
+add_hltools_windows_version(hltools "${PROJECT_DESCRIPTION}")
 set_target_properties(hltools PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
 if(BUILD_TESTING)

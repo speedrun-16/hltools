@@ -20,11 +20,12 @@ Under development. Bugs, incomplete behavior and output differences may still oc
 | `hltools vis` / `hlvis` | Complete | Compute and compress the potentially visible set |
 | `hltools rad` / `hlrad` | Complete | CPU radiosity lighting plus optional approximate Vulkan GPU gathering |
 | `hltools bspinfo` | Complete | Inspect BSP stages, entities, textures, WAD references and engine limits |
+| `hltools bsp pack` | Available | Package a BSP and referenced assets with game-directory hierarchy and a `.res` file |
 | `hltools wad` | Complete | List, extract and build WAD3 texture archives; accepts WAD or BSP input |
 | `hltools lightmap` | Complete | Export all face lightmaps and styles to a deterministic 24-bit BMP atlas |
 | `hltools decompile` | Complete | Reconstruct an editable Valve 220 MAP and companion WAD from a BSP |
 | `hltools ripent` | Planned | Import and export entity and texture lumps |
-| `hltools model` | Planned | Compile and decompile GoldSrc studio models |
+| `hltools model` | Available | Convert Source studio models and build full-resolution GoldSrc skybox models |
 
 The CPU compiler stages preserve reference compiler behavior across real maps and feature fixtures. GPU RAD is deliberately approximate; see [Accuracy and compatibility](#accuracy-and-compatibility).
 
@@ -177,6 +178,65 @@ The standalone equivalents are `hlcsg`, `hlbsp`, `hlvis` and `hlrad`.
 
 Run `hltools <command> -h` for the authoritative option list. Options may appear before or after the map name for individual compiler commands.
 
+## Source studio-model conversion
+
+`hltools model convert` rebuilds a Source studio model as one self-contained
+GoldSrc v10 MDL:
+
+```powershell
+hltools model convert cstrike/models/props/crate.mdl models/crate.mdl -game cstrike
+```
+
+The Source `.mdl` must have its sibling `.vvd` and `.dx90.vtx`, `.dx80.vtx`, or
+`.vtx` file beside it. The converter reads LOD 0, embeds palettized skins up to
+512x512, preserves bones and supported animation sequences, and automatically
+splits geometry that exceeds GoldSrc's per-submodel vertex limit. Source models
+with versions 44 through 49 are supported.
+
+`-game` points at the Source content directory used to resolve VMT/VTF skins
+from loose files and `_dir.vpk` archives. It is inferred when the input path is
+under a `models` directory. Unresolved skins are replaced with an obvious purple
+placeholder and reported after conversion. Use `-force` to overwrite an output.
+
+## Full-resolution skybox models
+
+GoldSrc's normal `gfx/env` sky path is conventionally limited to 256x256 faces.
+`hltools model skybox` can instead turn six high-resolution TGA faces into a
+large studio-model cube:
+
+```powershell
+hltools model skybox gfx/env/night models/night_sky -size 131072
+```
+
+The input files are
+`night{up,lf,ft,rt,bk,dn}.tga`. Studio skins are limited to 512x512, so a
+1024x1024 face is losslessly divided into four skins. The resulting cube uses
+24 skins and 48 triangles; no face is resized. GoldSrc permits at most 64 skins
+in one model, so larger skies are automatically divided across
+`night_sky0.mdl`, `night_sky1.mdl`, and so on. Place one `cycler_sprite` for
+every emitted model at the same origin.
+
+The model skins carry `FLATSHADE`, `FULLBRIGHT`, and `NOMIPS`. `FULLBRIGHT`
+makes a light entity unnecessary on engines that implement the standard studio
+flags; placing a white light in the model room is still a harmless compatibility
+fallback. RAD's default is already `-limiter 255`.
+
+A reliable map setup is:
+
+- Build a small sealed room in the void, preferably near the map origin.
+- Put every `cycler_sprite` and an `info_overview_point` in that room.
+- Set `reverse` to `1` on `info_overview_point`, so every leaf sees the
+  model's leaf.
+- Set worldspawn `MaxRange` to at least `200000`.
+
+When porting a Source BSP, export native-sized faces first. `-skysize` supports
+power-of-two sizes through 4096 for this workflow:
+
+```powershell
+hltools decompile source.bsp staging/map.map -game path/to/game -skysize 1024
+hltools model skybox staging/gfx/env/night staging/models/night_sky
+```
+
 ## Command reference
 
 ### `compile`
@@ -199,6 +259,8 @@ Accepts all CSG, BSP, VIS and RAD options, plus:
 > **Changed default:** `AAATRIGGER` render faces are now preserved by default, and the old `-nonullifytrigger` option was removed. Pass `-nullifytrigger` to get the previous default behavior that strips trigger faces to NULL.
 >
 > **Changed default:** Exact full visibility is now the default instead of requiring `-full`. It culls best, and its tighter source clipping usually prunes the portal flow enough to also run faster than normal visibility. `-full` is still accepted for existing command lines; pass `-nofull` to get the previous default behavior.
+>
+> **Changed default:** Every used texture is now embedded in the BSP, so a compiled map is self contained, and the old `-nowadtextures` option was removed. Pass `-wadtextures` to get the previous default behavior that leaves textures in the WADs and records those paths on worldspawn for the engine to load at runtime. Embedding leaves no runtime WAD list, so `-nowadautodetect` and `-wadinclude` only take effect together with `-wadtextures` and CSG warns when they are passed alone. `-wadcfgfile` and `-wadconfig` still apply either way, because they select the WADs the textures are read from.
 
 <details>
 <summary><strong>CSG options</strong></summary>
@@ -212,7 +274,7 @@ hlcsg [options] <map>
 
 | Group | Option | Effect |
 |---|---|---|
-| Textures | `-nowadtextures` | Embed every used texture in the BSP |
+| Textures | `-wadtextures` | Reference textures from the WADs at runtime instead of embedding them in the BSP |
 | Textures | `-wadinclude <name>` | Embed textures from WAD paths matching `name`; repeatable |
 | Textures | `-nowadautodetect` | Keep unused WADs in the written worldspawn WAD list |
 | Textures | `-wadcfgfile <file>` | Read WAD paths from a configuration file |
@@ -259,6 +321,29 @@ hlbsp [options] <map>
 | Misc | `-threads <n>` | Set the shared worker count |
 
 </details>
+
+### `bsp pack`
+
+```text
+hltools bsp pack <map.bsp> <output-dir> [options]
+```
+
+Builds a distributable folder rooted like a GoldSrc game directory. The BSP is
+written to `maps/`, referenced assets retain paths such as `models/`, `sprites/`,
+`sound/`, and `gfx/env/`, and `maps/<map>.res` lists the files using the plain
+GoldSrc resource-list format.
+
+Dependencies are discovered from the entity lump, worldspawn WAD and sky
+settings, model texture/sequence companions, and existing map description,
+detail, navigation, and overview files. Entries from an existing map `.res` are
+merged as authoritative hand-declared dependencies.
+
+| Option | Effect |
+|---|---|
+| `-game <dir>` | Source game directory. Inferred when the input BSP is inside its `maps` directory |
+| `-base <dir>` | Installed base content to recognize but exclude from the package and `.res`; repeatable. Sibling roots such as `cstrike` and `valve` are inferred when available |
+| `-force` | Overwrite files already present below the output directory |
+| `-strict` | Fail without writing the package if any referenced resource is missing |
 
 <details>
 <summary><strong>VIS options</strong></summary>
@@ -434,7 +519,7 @@ The decompilation approach is based primarily on [HalfLife.UnifiedSdk.MapDecompi
 
 | Entity or key | Compiler behavior | Default |
 |---|---|---|
-| `worldspawn` | Reads `wad`, `mapversion`, `wadcfgfile` and `wadconfig`. CSG replaces `wad` with the WAD paths needed by the BSP and writes the `compiler` key | WAD keys absent and map version `0` |
+| `worldspawn` | Reads `wad`, `mapversion`, `wadcfgfile` and `wadconfig`. CSG clears `wad` once the textures are embedded, or under `-wadtextures` replaces it with the WAD paths the BSP still needs, and writes `compiler` plus the UTC ISO-8601 `compiled_at` timestamp | WAD keys absent and map version `0` |
 | `func_group` | Moves its brushes into worldspawn and removes the entity | Not applicable |
 | `func_detail` | Uses the same merge as `func_group`. Detail behavior comes from the `zhlt_detaillevel` values retained on its brushes | Detail level `0` |
 | `info_hullshape` | Defines a named collision hull from at most one brush other than ORIGIN. `defaulthulls` bits `2`, `4` and `8` assign the shape to hulls 1, 2 and 3. `disabled 1` makes a selected shape use normal hull expansion | `defaulthulls 0` and `disabled 0` |
@@ -579,6 +664,7 @@ Each key except `classname` and `origin` is a texture name.
 |---|---|---|
 | `info_texlights` | Defines emitted color using RAD file syntax. An earlier definition loaded from a RAD file keeps precedence for the same texture | No emission definition |
 | `info_minlights` | Sets the minimum light for the texture in the range 0 through 1 | No texture specific minimum |
+| `info_unlittextures` | Bakes a constant-white lightmap on faces using each enabled texture, preserving whole-surface fullbright materials such as Source `UnlitGeneric` | Normal lightmapping |
 | `info_chopscale` | Multiplies the calculated patch size by a positive value. Zero and negative values are ignored | `1` |
 | `info_smoothvalue` | Replaces the smoothing angle in degrees for the texture | Inherit `-smooth`, normally `50` degrees |
 | `info_translucent` | Sets scalar or RGB light transmission from 0 through 1 between the front and back of a face | `0 0 0` |
@@ -634,10 +720,28 @@ python tools/gather_diff.py reference.gather candidate.gather
 
 The scripts require Python 3 and NumPy. The `lightmap` command provides a fast visual companion to these numeric comparisons.
 
+### Remove a TrenchBroom group volume
+
+`tools/remove_map_group_volume.py` treats a named TrenchBroom group containing
+six slab brushes as a hollow box and removes map content inside its inner
+bounds. The default is a read-only dry run and preserves every brush that
+crosses the boundary:
+
+```powershell
+python tools/remove_map_group_volume.py maps/example.map toberemoved
+python tools/remove_map_group_volume.py maps/example.map toberemoved -o maps/example_clean.map
+python tools/remove_map_group_volume.py maps/example.map toberemoved --in-place
+```
+
+`--in-place` always creates a timestamped backup. Use `--group-source` to read
+the marker from another map or TrenchBroom autosave. `--mode centroid`
+reproduces the less conservative centroid selection, while
+`--mode intersecting` deliberately removes boundary-crossing brushes.
+
 ## What remains
 
 - Implement `hltools ripent` for importing and exporting entity lumps and embedded textures.
-- Implement `hltools model` for GoldSrc studio model compilation and decompilation.
+- Implement GoldSrc QC/SMD compilation and decompilation under `hltools model`; `model convert` writes binary `.mdl` directly and has no QC/SMD path.
 - Implement studio model shadows requested by `env_static` and `zhlt_studioshadow`.
 - Implement VIS `-maxdistance`; it is recognized today but fails explicitly.
 - Parallelize useful BSP work; `-threads` configures the shared pool, but most BSP processing is still serial.

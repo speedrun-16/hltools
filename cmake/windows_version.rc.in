@@ -1,0 +1,31 @@
+#include <windows.h>
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @HLTOOLS_VERSION_MAJOR@,@HLTOOLS_VERSION_MINOR@,@HLTOOLS_VERSION_PATCH@,0
+ PRODUCTVERSION @HLTOOLS_VERSION_MAJOR@,@HLTOOLS_VERSION_MINOR@,@HLTOOLS_VERSION_PATCH@,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "@HLTOOLS_FILE_DESCRIPTION@\0"
+            VALUE "FileVersion", "@HLTOOLS_VERSION@\0"
+            VALUE "InternalName", "@HLTOOLS_INTERNAL_NAME@\0"
+            VALUE "LegalCopyright", "https://github.com/speedrun-16/hltools\0"
+            VALUE "OriginalFilename", "@HLTOOLS_ORIGINAL_FILENAME@\0"
+            VALUE "ProductName", "hltools\0"
+            VALUE "ProductVersion", "@HLTOOLS_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
