@@ -179,8 +179,7 @@ namespace rad
             }
             else if (!strcmp(mapent->value("classname"), "info_unlittextures"))
             {
-                logging::info("Reading unlit textures from info_unlittextures map entity\n");
-
+                const std::size_t before = state.unlittextures.size();
                 for (size_t ep = 0; ep < mapent->pairs().size(); ep++)
                 {
                     const char *key = mapent->pairs()[ep].first.c_str();
@@ -196,6 +195,8 @@ namespace rad
                     if (enabled != 0)
                         state.unlittextures.emplace_back(key);
                 }
+                logging::info("  %-14s %zu parsed (info_unlittextures)\n", "unlittextures",
+                              state.unlittextures.size() - before);
             }
             if (found_minlights && found_texlights)
             {
