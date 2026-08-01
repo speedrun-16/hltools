@@ -76,6 +76,7 @@ add_hltools_unit(unit_format
     PREFIX "unit.format."
     SOURCES
         unit/format/bsp_extensions.cpp
+        unit/format/chunk_skins.cpp
         unit/format/entity_lump.cpp
         unit/format/mdl/goldsrc.cpp
         unit/format/quantize.cpp

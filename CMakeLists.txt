@@ -185,6 +185,7 @@ add_library(hltools_format STATIC
     src/format/bsp/usage_chart.cpp
     src/format/zip/archive.cpp
     src/format/image/quantize.cpp
+    src/format/mdl/chunk_skins.cpp
     src/format/image/resample.cpp
     src/format/map/document.cpp
     src/format/mdl/goldsrc/model.cpp
