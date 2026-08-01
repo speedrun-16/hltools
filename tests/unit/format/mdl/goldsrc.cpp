@@ -5,7 +5,7 @@
 
 #include "common/binary.h"
 #include "common/types.h"
-#include "format/mdl/goldsrc_mdl.h"
+#include "format/mdl/goldsrc/model.h"
 #include "support/test.h"
 
 namespace

@@ -15,7 +15,7 @@
 #include "../../common/log.h"
 #include "../../common/string_util.h"
 #include "../../decompile/map_decompiler.h"
-#include "../../decompile/source_map_decompiler.h"
+#include "../../decompile/source/map.h"
 #include "format/zip/archive.h"
 #include "format/bsp/data.h"
 #include "format/bsp/file.h"

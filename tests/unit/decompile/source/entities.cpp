@@ -1,7 +1,7 @@
 #include <cstring>
 #include <vector>
 
-#include "decompile/source_entities.h"
+#include "decompile/source/entities.h"
 #include "format/bsp/entity_lump.h"
 #include "support/test.h"
 

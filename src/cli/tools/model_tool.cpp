@@ -10,7 +10,7 @@
 #include "common/filesystem.h"
 #include "common/log.h"
 #include "common/string_util.h"
-#include "decompile/source_models.h"
+#include "decompile/source/models.h"
 #include "model/skybox_model.h"
 
 namespace stdfs = std::filesystem;

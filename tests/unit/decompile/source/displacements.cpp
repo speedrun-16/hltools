@@ -1,6 +1,6 @@
 #include <cmath>
 
-#include "decompile/source_displacements.h"
+#include "decompile/source/displacements.h"
 #include "format/vbsp/data.h"
 #include "support/test.h"
 

@@ -1,4 +1,4 @@
-#include "source_mdl.h"
+#include "model.h"
 
 #include <array>
 #include <cmath>

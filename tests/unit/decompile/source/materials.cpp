@@ -6,7 +6,7 @@
 #include "common/binary.h"
 #include "common/filesystem.h"
 #include "common/types.h"
-#include "decompile/source_materials.h"
+#include "decompile/source/materials.h"
 #include "format/vbsp/data.h"
 #include "support/scratch.h"
 #include "support/test.h"

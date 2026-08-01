@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "format/miptex/texture.h"
-#include "source_models.h"
-#include "source_skybox.h"
+#include "models.h"
+#include "skybox.h"
 
 namespace format
 {

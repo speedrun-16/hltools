@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "common/types.h"
-#include "studio_model.h"
+#include "format/mdl/studio_model.h"
 
 namespace format
 {

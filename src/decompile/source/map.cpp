@@ -1,4 +1,4 @@
-#include "source_map_decompiler.h"
+#include "map.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,14 +9,14 @@
 #include <string>
 #include <vector>
 
-#include "source_entities.h"
-#include "source_displacements.h"
-#include "source_materials.h"
+#include "entities.h"
+#include "displacements.h"
+#include "materials.h"
 #include "format/map/document.h"
 #include "format/vbsp/data.h"
 #include "format/bsp/entity_lump.h"
-#include "../math/vector.h"
-#include "../math/winding.h"
+#include "math/vector.h"
+#include "math/winding.h"
 
 namespace decompile
 {

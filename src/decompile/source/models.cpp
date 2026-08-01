@@ -1,4 +1,4 @@
-#include "source_models.h"
+#include "models.h"
 
 #include <algorithm>
 #include <cctype>
@@ -10,8 +10,8 @@
 #include "common/filesystem.h"
 #include "format/bsp/entity_lump.h"
 #include "format/image/quantize.h"
-#include "format/mdl/goldsrc_mdl.h"
-#include "format/mdl/source_mdl.h"
+#include "format/mdl/goldsrc/model.h"
+#include "format/mdl/source/model.h"
 #include "format/vbsp/data.h"
 #include "format/vbsp/pakfile.h"
 #include "format/vmt/vmt.h"

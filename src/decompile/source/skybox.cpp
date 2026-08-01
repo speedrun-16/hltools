@@ -1,4 +1,4 @@
-#include "source_skybox.h"
+#include "skybox.h"
 
 #include <algorithm>
 #include <cctype>

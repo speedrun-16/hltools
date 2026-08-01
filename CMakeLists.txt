@@ -186,8 +186,8 @@ add_library(hltools_format STATIC
     src/format/zip/archive.cpp
     src/format/image/quantize.cpp
     src/format/map/document.cpp
-    src/format/mdl/goldsrc_mdl.cpp
-    src/format/mdl/source_mdl.cpp
+    src/format/mdl/goldsrc/model.cpp
+    src/format/mdl/source/model.cpp
     src/format/miptex/texture.cpp
     src/format/rad/texlights.cpp
     src/format/vbsp/file.cpp
@@ -212,12 +212,12 @@ target_link_libraries(hltools_compile_parameters
 # decompile: read only bsp tree reconstruction and valve 220 map writing
 add_library(hltools_decompile STATIC
     src/decompile/map_decompiler.cpp
-    src/decompile/source_displacements.cpp
-    src/decompile/source_entities.cpp
-    src/decompile/source_map_decompiler.cpp
-    src/decompile/source_materials.cpp
-    src/decompile/source_models.cpp
-    src/decompile/source_skybox.cpp
+    src/decompile/source/displacements.cpp
+    src/decompile/source/entities.cpp
+    src/decompile/source/map.cpp
+    src/decompile/source/materials.cpp
+    src/decompile/source/models.cpp
+    src/decompile/source/skybox.cpp
 )
 target_include_directories(hltools_decompile PUBLIC src)
 target_link_libraries(hltools_decompile PUBLIC hltools_format hltools_math hltools_common)

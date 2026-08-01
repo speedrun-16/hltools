@@ -4,7 +4,7 @@
 
 #include "common/filesystem.h"
 #include "common/types.h"
-#include "decompile/source_models.h"
+#include "decompile/source/models.h"
 #include "support/scratch.h"
 #include "support/test.h"
 

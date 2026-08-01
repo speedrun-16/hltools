@@ -4,7 +4,7 @@
 
 #include "common/binary.h"
 #include "common/types.h"
-#include "format/mdl/source_mdl.h"
+#include "format/mdl/source/model.h"
 #include "support/test.h"
 
 namespace

@@ -77,21 +77,21 @@ add_hltools_unit(unit_format
     SOURCES
         unit/format/bsp_extensions.cpp
         unit/format/entity_lump.cpp
-        unit/format/goldsrc_mdl.cpp
+        unit/format/mdl/goldsrc.cpp
         unit/format/quantize.cpp
         unit/format/rad_file.cpp
-        unit/format/source_mdl.cpp
+        unit/format/mdl/source.cpp
     LIBRARIES hltools_format
     LABEL unit.format)
 
 add_hltools_unit(unit_decompile
     PREFIX "unit.decompile."
     SOURCES
-        unit/decompile/source_displacements.cpp
-        unit/decompile/source_entities.cpp
-        unit/decompile/source_materials.cpp
-        unit/decompile/source_models.cpp
-        unit/decompile/source_skybox.cpp
+        unit/decompile/source/displacements.cpp
+        unit/decompile/source/entities.cpp
+        unit/decompile/source/materials.cpp
+        unit/decompile/source/models.cpp
+        unit/decompile/source/skybox.cpp
     LIBRARIES hltools_decompile
     LABEL unit.decompile)
 

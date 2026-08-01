@@ -1,4 +1,4 @@
-#include "goldsrc_mdl.h"
+#include "model.h"
 
 #include <algorithm>
 #include <array>

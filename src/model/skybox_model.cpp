@@ -11,7 +11,7 @@
 #include "common/binary.h"
 #include "common/filesystem.h"
 #include "format/image/quantize.h"
-#include "format/mdl/goldsrc_mdl.h"
+#include "format/mdl/goldsrc/model.h"
 #include "format/mdl/studio_model.h"
 
 namespace model

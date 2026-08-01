@@ -4,7 +4,7 @@
 
 #include "common/binary.h"
 #include "common/types.h"
-#include "decompile/source_skybox.h"
+#include "decompile/source/skybox.h"
 #include "format/vbsp/data.h"
 #include "support/test.h"
 
