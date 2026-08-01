@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "common/string_util.h"
 #include "entities.h"
 #include "displacements.h"
 #include "materials.h"
@@ -67,6 +69,111 @@ namespace decompile
             for (char &c : s)
                 c = (char)std::tolower((unsigned char)c);
             return s;
+        }
+
+        vec3 rotate_model_point(const vec3 &point, const double angles[3])
+        {
+            double pitch = angles[0] * math::pi / 180.0;
+            double yaw = angles[1] * math::pi / 180.0;
+            double roll = angles[2] * math::pi / 180.0;
+            double sp = std::sin(pitch), cp = std::cos(pitch);
+            double sy = std::sin(yaw), cy = std::cos(yaw);
+            double sr = std::sin(roll), cr = std::cos(roll);
+
+            // source's AngleMatrix columns are the world directions of the
+            // model's local X/Y/Z axes. goldsrc uses the same QAngle convention.
+            return {
+                point.x * (cp * cy) + point.y * (sp * sr * cy - cr * sy)
+                    + point.z * (sp * cr * cy + sr * sy),
+                point.x * (cp * sy) + point.y * (sp * sr * sy + cr * cy)
+                    + point.z * (sp * cr * sy - sr * cy),
+                point.x * (-sp) + point.y * (sr * cp) + point.z * (cr * cp)
+            };
+        }
+
+        // places one merged .phy piece in the world. the rotation is baked into
+        // the planes rather than left on the entity: CFuncWall::Spawn clears
+        // pev->angles, so a brush entity cannot carry a prop's orientation, and
+        // every static prop in a source map is free to be rotated.
+        //
+        // a plane (n, d) taken through p = R*x + t satisfies dot(R*n, p) = d +
+        // dot(R*n, t), so only the normal is rotated and the distance picks up
+        // the origin term.
+        format::map_brush phy_collision_brush(const format::source_phy_convex &convex,
+                                              const prop_placement &prop)
+        {
+            format::map_brush brush;
+            if (convex.vertices.size() < 4)
+                return brush;
+
+            // an IVP ledge is a closed convex hull, so its face planes are just
+            // its triangles' planes with the duplicates of each flat face
+            // dropped. the centroid tells outward from inward.
+            vec3 center;
+            for (const vec3 &vertex : convex.vertices)
+                center += vertex;
+            center = center * (1.0 / (double)convex.vertices.size());
+
+            struct face_plane { vec3 normal; double dist; };
+            std::vector<face_plane> planes;
+            for (const std::array<unsigned, 3> &triangle : convex.triangles)
+            {
+                if (triangle[0] >= convex.vertices.size()
+                    || triangle[1] >= convex.vertices.size()
+                    || triangle[2] >= convex.vertices.size())
+                    continue;
+                const vec3 &a = convex.vertices[triangle[0]];
+                const vec3 &b = convex.vertices[triangle[1]];
+                const vec3 &c = convex.vertices[triangle[2]];
+                vec3 normal = math::cross(b - a, c - a);
+                if (math::normalize(normal) == 0)
+                    continue;
+                if (math::dot(normal, center - a) > 0)
+                    normal = -normal;
+                double dist = math::dot(normal, a);
+
+                bool duplicate = false;
+                for (const face_plane &plane : planes)
+                    if (math::dot(normal, plane.normal) > 0.99999
+                        && std::fabs(dist - plane.dist) < 0.02)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                if (!duplicate)
+                    planes.push_back({normal, dist});
+            }
+
+            vec3 origin{prop.origin[0], prop.origin[1], prop.origin[2]};
+            for (const face_plane &plane : planes)
+            {
+                vec3 normal = rotate_model_point(plane.normal, prop.angles);
+                if (math::normalize(normal) == 0)
+                    continue;
+                format::map_side side = format::map_side::from_plane(
+                    normal, plane.dist + math::dot(normal, origin));
+                // use NULL rather than CLIP: CLIP rewrites a brush into the
+                // collision hulls alone, which is meaningless inside a brush
+                // entity. NULL is goldsrc's invisible-but-solid face, so the
+                // entity renders nothing and still blocks the player.
+                side.texture = "NULL";
+                brush.sides.push_back(std::move(side));
+            }
+            if (brush.sides.size() < 4)
+                brush.sides.clear();
+            return brush;
+        }
+
+        // "models/hextra/h_plats-2a.mdl" -> "h_plats-2a"
+        std::string model_basename(const std::string &path)
+        {
+            std::size_t slash = path.find_last_of("/\\");
+            std::string name = slash == std::string::npos
+                ? path : path.substr(slash + 1);
+            std::size_t dot = name.find_last_of('.');
+            if (dot != std::string::npos)
+                name.erase(dot);
+            return name;
         }
 
         struct plane_side
@@ -665,6 +772,25 @@ namespace decompile
             return nullptr;
         }
 
+        // an $additive material blends onto the scene rather than covering it,
+        // which goldsrc expresses as rendermode 5 on the owning entity
+        bool has_additive_material(const format::source_map_data &map,
+                                   const material_catalog &catalog,
+                                   const format::source_dbrush_t &brush)
+        {
+            for (int i = 0; i < brush.numsides; i++)
+            {
+                std::size_t side_index = (std::size_t)(brush.firstside + i);
+                if (side_index >= map.brushsides.size())
+                    continue;
+                const std::string &material =
+                    map.texinfo_material(map.brushsides[side_index].texinfo);
+                if (!material.empty() && catalog.resolve(material).additive)
+                    return true;
+            }
+            return false;
+        }
+
         // the render amount reproducing a window brush's translucency: the first
         // translucent side material decides, matching how source shades the brush
         int window_render_amount(const format::source_map_data &map,
@@ -714,6 +840,8 @@ namespace decompile
                 && std::strcmp(classname, "func_detail") != 0)
                 return false;
             if (entity.keyvalues.value("targetname")[0] != '\0')
+                return false;
+            if (entity.keyvalues.value("zhlt_usemodel")[0] != '\0')
                 return false;
             for (const format::entity::pair &kv : entity.keyvalues.pairs())
                 if (kv.first.size() > 2 && kv.first[0] == 'O' && kv.first[1] == 'n')
@@ -844,8 +972,32 @@ namespace decompile
         remap_source_entities(entities, spawn_stats);
         result.dropped_spawns = spawn_stats.dropped_spawns;
         result.player_start = spawn_stats.player_start;
+        result.fog_controllers = spawn_stats.fog_controllers;
+        result.cameras = spawn_stats.cameras;
+        result.converted_lights = spawn_stats.lights;
 
         entities[0].set("mapversion", "220");
+        // goldsrc clips the world at MaxRange, defaulting to 4096. source has no
+        // such key and its maps are routinely larger, so a ported map without one
+        // would have its far half clipped away. size it to the map's own diagonal
+        // so nothing inside the world is ever culled by distance.
+        if (entities[0].value("MaxRange")[0] == '\0' && !map.models.empty())
+        {
+            const format::source_dmodel_t &world = map.models[0];
+            double span = 0;
+            for (int k = 0; k < 3; k++)
+            {
+                double extent = (double)world.maxs[k] - (double)world.mins[k];
+                span += extent * extent;
+            }
+            long range = (long)std::sqrt(span);
+            // round up to a whole 1024 and never go below the engine default
+            range = ((range + 1023) / 1024) * 1024;
+            if (range < 4096)
+                range = 4096;
+            result.max_range = range;
+            entities[0].set("MaxRange", std::to_string(range).c_str());
+        }
         {
             // the companion wad carries the converted materials, the tool wad the
             // engine textures; a ported map needs both on worldspawn's wad list
@@ -901,6 +1053,7 @@ namespace decompile
             {
                 const brush_range &range = ranges[(std::size_t)model_index];
                 bool masked = false;
+                bool additive = false;
                 int translucent_amount = -1;
                 for (int b = range.first; b < range.last_exclusive; b++)
                 {
@@ -920,6 +1073,9 @@ namespace decompile
                         continue;
                     if (has_masked_material(map, catalog, map.brushes[(std::size_t)b]))
                         masked = true;
+                    else if (has_additive_material(map, catalog,
+                                                   map.brushes[(std::size_t)b]))
+                        additive = true;
                     else if (translucent_amount < 0)
                     {
                         const resolved_material *tm = translucent_material(
@@ -950,12 +1106,30 @@ namespace decompile
                         out.keyvalues.set("renderamt", "255");
                         result.masked_entities++;
                     }
+                    else if (additive && opaque)
+                    {
+                        out.keyvalues.set("rendermode", "5");
+                        out.keyvalues.set("renderamt", "255");
+                        result.additive_entities++;
+                    }
                     else if (translucent_amount >= 0 && opaque)
                     {
                         out.keyvalues.set("rendermode", "2");
                         out.keyvalues.set("renderamt",
                                           std::to_string(translucent_amount).c_str());
                         result.translucent_entities++;
+                    }
+
+                    // goldsrc tests a SOLID_TRIGGER brush model against hull 0
+                    // alone, so the three clip hulls csg would build for it are
+                    // never consulted. on a prop-heavy port clipnodes are the
+                    // scarcest budget in the bsp, and triggers are often the
+                    // largest single consumer of them.
+                    if (str::istarts_with(out.keyvalues.value("classname"),
+                                          "trigger_"))
+                    {
+                        out.keyvalues.set("zhlt_noclip", "1");
+                        result.trigger_noclip_entities++;
                     }
                 }
             }
@@ -976,10 +1150,13 @@ namespace decompile
                     map.brushes[(std::size_t)b];
                 const resolved_material *water = water_material(map, catalog, source_brush);
                 bool masked = !water && has_masked_material(map, catalog, source_brush);
-                bool window = !water && !masked && is_window_brush(source_brush.contents);
-                bool detail = !water && !masked && !window
+                bool additive = !water && !masked
+                    && has_additive_material(map, catalog, source_brush);
+                bool window = !water && !masked && !additive
+                    && is_window_brush(source_brush.contents);
+                bool detail = !water && !masked && !additive && !window
                     && (source_brush.contents & contents_detail) != 0;
-                if (!water && !masked && !window && !detail)
+                if (!water && !masked && !additive && !window && !detail)
                     continue;
                 format::map_brush brush;
                 if (!build_brush(map, b, vec3{}, true, catalog, box, result, brush))
@@ -1006,6 +1183,14 @@ namespace decompile
                     doc.add_brush(std::move(brush), "func_wall",
                                   {{"rendermode", "4"}, {"renderamt", "255"}});
                     result.masked_brushes++;
+                }
+                else if (additive)
+                {
+                    // rendermode additive: the texture is added to the scene, so
+                    // its black texels read as transparent, matching $additive
+                    doc.add_brush(std::move(brush), "func_wall",
+                                  {{"rendermode", "5"}, {"renderamt", "255"}});
+                    result.additive_brushes++;
                 }
                 else if (window)
                 {
@@ -1036,7 +1221,18 @@ namespace decompile
         // and so have to become entities.
         if (options.convert_models)
         {
-            convert_source_models(map, options.game_dirs, result.models);
+            convert_source_models(map, options.game_dirs, options.max_skin_size,
+                                  options.skin_chunk_level,
+                                  options.shared_tile_palette,
+                                  options.tile_area_keep, options.physics_clips,
+                                  result.models);
+            std::map<std::string, const converted_collision *> collision_by_model;
+            for (const converted_collision &collision : result.models.collisions)
+                collision_by_model.emplace(collision.model, &collision);
+            // trenchbroom groups for the prop collision: one per hex-tube face,
+            // created on demand so the map only carries groups it uses
+            std::map<int, format::map_group> collision_groups;
+            std::size_t physics_prop_id = 0;
             for (const prop_placement &prop : result.models.props)
             {
                 if (prop.model.empty())
@@ -1054,6 +1250,55 @@ namespace decompile
                                                  {"rendermode", "0"},
                                                  {"renderamt", "255"}});
                 result.prop_entities++;
+
+                // only solid mode 6 uses the .phy sidecar.
+                if (options.physics_clips && prop.solid == 6)
+                {
+                    auto found_collision = collision_by_model.find(prop.model);
+                    if (found_collision == collision_by_model.end())
+                        continue;
+                    const converted_collision *collision = found_collision->second;
+                    std::vector<format::map_brush> collision_brushes;
+                    collision_brushes.reserve(collision->physics.convexes.size());
+                    for (const format::source_phy_convex &convex
+                         : collision->physics.convexes)
+                    {
+                        format::map_brush brush = phy_collision_brush(convex, prop);
+                        if (!brush.sides.empty())
+                            collision_brushes.push_back(std::move(brush));
+                    }
+                    if (collision_brushes.empty())
+                        continue;
+
+                    // brush entities clear angles, so rotation is baked into one
+                    // entity per prop. keeping hulls separate also avoids one
+                    // shared collision tree spanning the map.
+                    // group by normalized roll for editor cleanup.
+                    int roll = (int)std::lround(prop.angles[2]);
+                    if (roll == -180)
+                        roll = 180;
+                    auto face = collision_groups.find(roll);
+                    if (face == collision_groups.end())
+                        face = collision_groups
+                                   .emplace(roll,
+                                            doc.add_group("roll " + std::to_string(roll)))
+                                   .first;
+
+                    // keep each prop selectable within its roll group.
+                    std::string name = model_basename(prop.model)
+                                     + "_r" + std::to_string(roll)
+                                     + "_" + std::to_string(physics_prop_id++);
+                    format::map_group piece = doc.add_group(name, face->second);
+
+                    format::map_entity &solid = doc.add_entity("func_wall");
+                    // a unique targetname prevents the inert-entity merge.
+                    solid.set("targetname", "phy_" + name);
+                    doc.assign_group(solid, piece);
+                    solid.brushes = std::move(collision_brushes);
+                    result.entity_brushes += solid.brushes.size();
+                    result.physics_clip_brushes += solid.brushes.size();
+                    result.physics_clip_props++;
+                }
             }
         }
 

@@ -93,11 +93,4 @@ namespace decompile
                                bool shared_tile_palette, float tile_area_keep,
                                bool load_physics,
                                model_result &out);
-
-    inline void convert_source_models(const format::source_map_data &map,
-                                      const std::vector<std::string> &game_dirs,
-                                      model_result &out)
-    {
-        convert_source_models(map, game_dirs, 512, 1, false, 1.0f, false, out);
-    }
 }

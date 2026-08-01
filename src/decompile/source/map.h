@@ -42,6 +42,29 @@ namespace decompile
         // rebuild the map's studio models as goldsrc models and place them as
         // entities. off leaves the map brush only.
         bool convert_models = true;
+        // maximum edge length of a converted model's embedded skins. goldsrc
+        // stores skins inside each model, so a material shared by many models is
+        // paid for once per model: this is the only lever on the model payload.
+        unsigned max_skin_size = 512;
+        // a source texture larger than max_skin_size is cut into up to this many
+        // tiles on each axis (1, 2, 4 or 8) and the mesh is split to match, so the
+        // model keeps up to chunk_level x max_skin_size of its resolution
+        // instead of being squeezed into one skin. 1 disables tiling.
+        int skin_chunk_level = 1;
+        // share one palette across a material's tiles. seamless, but 256
+        // colours then cover every tile instead of one, which costs roughly
+        // half the colour resolution per tile. off keeps each tile's own
+        // palette and accepts a faint line at tile boundaries.
+        bool shared_tile_palette = false;
+        // fraction of a model's surface area that gets its own full
+        // resolution tile; the remainder shares one untiled skin per
+        // material. uv coverage is very uneven, so trimming the tail cuts
+        // video memory and draw calls hard for almost no visible loss.
+        float tile_area_keep = 1.0f;
+        // turn terminal convex pieces from SOLID_VPHYSICS static props' .phy
+        // sidecars into invisible solid brush entities. off by default
+        // because dense Source collision can exceed GoldSrc's clipnode budget.
+        bool physics_clips = false;
     };
 
     struct source_result
@@ -58,6 +81,9 @@ namespace decompile
         std::size_t translucent_entities = 0;
         std::size_t water_brushes = 0;  // liquid brushes routed to func_water
         std::size_t clip_brushes = 0;   // pure playerclip volumes given CLIP
+        std::size_t physics_clip_brushes = 0; // .phy clip brushes placed
+        std::size_t physics_clip_props = 0;   // props that got .phy collision
+        std::size_t trigger_noclip_entities = 0; // triggers spared clip hulls
         // 3d skybox brushes dropped: outside the world, no goldsrc equivalent
         std::size_t skybox_brushes = 0;
         std::size_t sides = 0;
@@ -80,8 +106,16 @@ namespace decompile
         // still need a real wad entry, so a tool wad like sdhlt.wad must be on
         // the map's wad list for these to resolve.
         std::set<std::string> engine_textures;
-        std::size_t dropped_spawns = 0; // extra team spawns removed
-        bool player_start = false;      // a single info_player_start was placed
+        std::size_t dropped_spawns = 0; // extra Source spawn entities removed
+        bool player_start = false; // the ported map has one info_player_start
+        std::size_t fog_controllers = 0; // env_fog_controller -> env_fog
+        std::size_t cameras = 0;         // point_viewcontrol -> trigger_camera
+        std::size_t converted_lights = 0; // light* with source keys renamed
+        // world brushes routed to func_wall rendermode 5 for an $additive material
+        std::size_t additive_brushes = 0;
+        std::size_t additive_entities = 0; // brush entities retagged rendermode 5
+        // far clip distance written to worldspawn, sized to the map's own extent
+        long max_range = 0;
 
         // companion wad textures built from the map's materials, to be written
         // by the caller alongside the map.
