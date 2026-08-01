@@ -30,7 +30,7 @@ suite("unit.decompile.source_models")
         result.vertices = 99;
         std::string error;
         expect_false(decompile::convert_source_model(
-            base.string() + ".mdl", {}, 512, result, &error));
+            base.string() + ".mdl", {}, 512, 1, false, 1.0f, result, &error));
         expect(result.data.empty());
         expect(result.vertices == 0);
         expect(error == "unsupported .mdl version 0");
@@ -46,7 +46,8 @@ suite("unit.decompile.source_models")
 
         decompile::source_model_conversion result;
         std::string error;
-        expect_false(decompile::convert_source_model(mdl.string(), {}, 512, result, &error));
+        expect_false(decompile::convert_source_model(
+            mdl.string(), {}, 512, 1, false, 1.0f, result, &error));
         expect(error.find("probe.vvd") != std::string::npos);
     }
 }

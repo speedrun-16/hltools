@@ -73,10 +73,12 @@ namespace decompile
         std::size_t chunked_skins = 0;
     };
 
-    // max_skin_size is clamped to a multiple of 16 in 16..512.
+    // max_skin_size is clamped to a multiple of 16 in 16..512. chunk_level
+    // controls the maximum tiles per axis; tile_area_keep is 0..1.
     bool convert_source_model(const std::string &source_mdl,
                               const std::vector<std::string> &game_dirs,
-                              unsigned max_skin_size,
+                              unsigned max_skin_size, int chunk_level,
+                              bool shared_tile_palette, float tile_area_keep,
                               source_model_conversion &out,
                               std::string *error = nullptr);
 

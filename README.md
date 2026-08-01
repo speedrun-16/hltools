@@ -209,6 +209,23 @@ The Source `.mdl` must have its sibling `.vvd` and `.dx90.vtx`, `.dx80.vtx`, or
 512x512, preserves bones and supported animations, and splits geometry that
 exceeds GoldSrc limits. Source model versions 44 through 49 are supported.
 
+Large skins are resized to 512x512 by default. Use `-chunkskins` to split the
+skin and its geometry into tiles instead. A level of `2`, `4`, or `8` preserves
+up to 1024, 2048, or 4096 pixels per axis with the default tile size:
+
+```powershell
+hltools model convert cstrike/models/props/crate.mdl models/crate.mdl -game cstrike -chunkskins 8 -sharedpalette
+```
+
+Skin options:
+
+| Option | Effect | Default |
+|---|---|---:|
+| `-maxskinsize <n>` | Set the tile size (`16..512`, step 16) | `512` |
+| `-chunkskins <n>` | Split skins into `1`, `2`, `4`, or `8` tiles per axis | `1` (off) |
+| `-sharedpalette` | Share one palette across skin tiles | Off |
+| `-tilearea <10..100>` | Limit the surface area receiving dedicated tiles | `100` |
+
 `-game` points at the Source content directory used to resolve VMT/VTF skins
 from loose files and `_dir.vpk` archives. It is inferred when the input path is
 under a `models` directory. Unresolved skins are replaced with an obvious purple

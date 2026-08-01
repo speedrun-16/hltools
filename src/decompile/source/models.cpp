@@ -614,7 +614,8 @@ namespace decompile
 
     bool convert_source_model(const std::string &source_mdl,
                               const std::vector<std::string> &game_dirs,
-                              unsigned max_skin_size,
+                              unsigned max_skin_size, int chunk_level,
+                              bool shared_tile_palette, float tile_area_keep,
                               source_model_conversion &out,
                               std::string *error)
     {
@@ -659,7 +660,8 @@ namespace decompile
         content.game_dirs = game_dirs;
         open_vpks(content);
         return convert_loaded(content, mdl, vvd, vtx, clamp_skin_dim(max_skin_size),
-                              1, false, 1.0f, out, error);
+                              chunk_level, shared_tile_palette, tile_area_keep,
+                              out, error);
     }
 
     void convert_source_models(const format::source_map_data &map,

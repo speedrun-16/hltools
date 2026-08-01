@@ -33,7 +33,11 @@ namespace tools
                 "\n"
                 "  -game <dir>    Source game content directory; inferred from a\n"
                 "                 source path below a models directory when omitted\n"
-                "  -force         overwrite an existing output model\n"
+                "  -maxskinsize <n> model skin cap, 16..512 in steps of 16\n"
+                "  -chunkskins <n>  tiles per skin axis: 1, 2, 4, or 8\n"
+                "  -sharedpalette   share palettes across skin tiles\n"
+                "  -tilearea <n>    surface area receiving tiles, 10..100\n"
+                "  -force           overwrite an existing output model\n"
                 "\n"
                 "skybox\n"
                 "  builds one or more GoldSrc studio models from the six TGA files\n"
@@ -95,6 +99,10 @@ namespace tools
         {
             bool force = false;
             std::vector<std::string> game_dirs;
+            unsigned max_skin_size = 512;
+            int skin_chunk_level = 1;
+            bool shared_tile_palette = false;
+            float tile_area_keep = 1.0f;
             std::vector<std::string> positional;
             for (int i = 2; i < argc; i++)
             {
@@ -112,6 +120,65 @@ namespace tools
                         return 1;
                     }
                     game_dirs.emplace_back(argv[i]);
+                    continue;
+                }
+                if (str::iequals(argv[i], "-sharedpalette"))
+                {
+                    shared_tile_palette = true;
+                    continue;
+                }
+                if (str::iequals(argv[i], "-maxskinsize")
+                    || str::iequals(argv[i], "-chunkskins")
+                    || str::iequals(argv[i], "-tilearea"))
+                {
+                    const std::string option = argv[i];
+                    if (++i >= argc || argv[i][0] == '\0')
+                    {
+                        logging::console("model convert: %s requires a value\n",
+                                         option.c_str());
+                        return 1;
+                    }
+                    if (str::iequals(option.c_str(), "-maxskinsize"))
+                    {
+                        char *end = nullptr;
+                        long value = std::strtol(argv[i], &end, 10);
+                        if (!end || *end != '\0' || value < 16 || value > 512
+                            || value % 16 != 0)
+                        {
+                            logging::console(
+                                "model convert: -maxskinsize expects a multiple "
+                                "of 16 from 16..512\n");
+                            return 1;
+                        }
+                        max_skin_size = (unsigned)value;
+                    }
+                    else if (str::iequals(option.c_str(), "-chunkskins"))
+                    {
+                        char *end = nullptr;
+                        long value = std::strtol(argv[i], &end, 10);
+                        if (!end || *end != '\0'
+                            || (value != 1 && value != 2 && value != 4
+                                && value != 8))
+                        {
+                            logging::console(
+                                "model convert: -chunkskins expects 1, 2, 4, or 8\n");
+                            return 1;
+                        }
+                        skin_chunk_level = (int)value;
+                    }
+                    else
+                    {
+                        char *end = nullptr;
+                        double value = std::strtod(argv[i], &end);
+                        if (!end || *end != '\0' || !std::isfinite(value)
+                            || value < 10.0 || value > 100.0)
+                        {
+                            logging::console(
+                                "model convert: -tilearea expects 10..100\n");
+                            return 1;
+                        }
+                        tile_area_keep = (float)(value / 100.0);
+                    }
                     continue;
                 }
                 if (argv[i][0] == '-')
@@ -157,7 +224,9 @@ namespace tools
 
             decompile::source_model_conversion conversion;
             std::string error;
-            if (!decompile::convert_source_model(source, game_dirs, 512, conversion, &error))
+            if (!decompile::convert_source_model(
+                    source, game_dirs, max_skin_size, skin_chunk_level,
+                    shared_tile_palette, tile_area_keep, conversion, &error))
             {
                 logging::console("model convert: %s\n", error.c_str());
                 return 1;
@@ -185,6 +254,9 @@ namespace tools
                     "warning: %zu skin(s) could not be resolved and use a purple "
                     "placeholder; check -game\n",
                     conversion.missing_skins);
+            if (conversion.chunked_skins)
+                logging::console("split %zu model skin(s) into tiles\n",
+                                 conversion.chunked_skins);
             return 0;
         }
 
