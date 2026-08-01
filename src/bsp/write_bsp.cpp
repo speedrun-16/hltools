@@ -46,10 +46,9 @@ namespace bsp
 
         writer_state g_writer;
 
-        clipnode_key make_key(const format::dclipnode_t &c)
+        clipnode_key make_clipnode_key(int planenum, int child0, int child1)
         {
-            return std::make_pair((int)c.planenum,
-                                  std::make_pair((int)c.children[0], (int)c.children[1]));
+            return std::make_pair(planenum, std::make_pair(child0, child1));
         }
 
         // hook for plane optimization: maps a used plane to its output slot
@@ -65,7 +64,14 @@ namespace bsp
                 return item->second;
 
             if ((int)g_writer.mapped_planes.size() >= limits::max_map_planes)
+            {
+                // clipnodes keep being counted past their own limit so the
+                // report can name a whole-map total, and that surplus is what
+                // exhausts the plane table. the clipnode budget is the cause
+                // then, and reporting it is far more use than the symptom.
+                fail_if_clipnode_limit_exceeded(state);
                 err::fatal("exceeded max_map_planes");
+            }
             g_writer.mapped_planes.push_back(state.planes[(size_t)planenum]);
             int out = (int)g_writer.mapped_planes.size() - 1;
             g_writer.planes_seen.emplace(planenum, out);
@@ -121,10 +127,19 @@ namespace bsp
             if (n->planenum & 1)
                 err::fatal("write_clip_nodes_r: odd planenum");
             cn.planenum = write_plane(state, n->planenum);
+            int children[2];
             for (int i = 0; i < 2; i++)
-                cn.children[i] = (short)write_clip_nodes_r(state, n->children[i], portalleaf, outputmap);
+            {
+                children[i] = write_clip_nodes_r(state, n->children[i], portalleaf,
+                                                 outputmap);
+                cn.children[i] = (short)children[i];
+            }
 
-            clipnode_map::iterator output = outputmap->find(make_key(cn));
+            // keep the merge key wide even after the disk limit is crossed. a
+            // narrowed child index wraps and could otherwise merge unrelated
+            // overflow nodes, making the projected-total diagnostic undercount.
+            clipnode_key key = make_clipnode_key(cn.planenum, children[0], children[1]);
+            clipnode_map::iterator output = outputmap->find(key);
             if (state.options.noclipnodemerge || output == outputmap->end())
             {
                 // keep emitting past the limit so the failure report can give
@@ -134,7 +149,7 @@ namespace bsp
                 if (c >= limits::max_map_clipnodes)
                     state.clipnode_limit_exceeded = true;
                 state.map->clipnodes[(size_t)c] = cn;
-                (*outputmap)[make_key(cn)] = c;
+                outputmap->emplace(std::move(key), c);
             }
             else
             {

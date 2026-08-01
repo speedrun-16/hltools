@@ -173,9 +173,6 @@ namespace bsp
                         write_clip_nodes(state, nodes);
                     }
                 }
-                // reported once all three hulls are counted, so the message can
-                // show where the budget actually went
-                fail_if_clipnode_limit_exceeded(state);
             }
 
             {
@@ -254,6 +251,11 @@ namespace bsp
             while (process_model(state))
             {
             }
+
+            // the budget is a whole-map one, so the check has to outlive the
+            // model loop: failing inside it reported a total that excluded
+            // every model after the first one to cross the line
+            fail_if_clipnode_limit_exceeded(state);
 
             // one consolidated leaf content report after every model and hull
             print_leaf_content_conflicts(state);
