@@ -80,6 +80,7 @@ add_hltools_unit(unit_format
         unit/format/mdl/goldsrc.cpp
         unit/format/quantize.cpp
         unit/format/rad_file.cpp
+        unit/format/resample.cpp
         unit/format/mdl/source.cpp
     LIBRARIES hltools_format
     LABEL unit.format)
