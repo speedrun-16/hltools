@@ -89,6 +89,20 @@ hltools tests several legal face orders against the same AllocBlock algorithm be
 
 The exact luxel totals identify the textures to fix. Page usage can be slightly higher because atlas packing leaves gaps between rectangles.
 
+## Embedded map source
+
+`hltools compile` embeds the editable MAP source in the final BSP by default.
+`hltools decompile` can restore it without reconstructing the map:
+
+```powershell
+hltools compile maps/example.map
+hltools decompile maps/example.bsp restored/example.map
+```
+
+The archive includes the compile settings and used texture-light definitions.
+GoldSrc ignores the appended ZIP data. Use `-noembedsource` to disable it. When
+no source is embedded, `decompile` reconstructs the map from the BSP geometry.
+
 ## Building
 
 Compiled Release archives for Windows and Linux are available from successful GitHub Actions runs. \
