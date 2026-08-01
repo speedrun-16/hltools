@@ -71,7 +71,7 @@ namespace decompile
         std::size_t physics_clip_brushes = 0; // .phy clip brushes placed
         std::size_t physics_clip_props = 0;   // props that got .phy collision
         std::size_t trigger_noclip_entities = 0; // triggers spared clip hulls
-        // 3d skybox brushes dropped: outside the world, no goldsrc equivalent
+        // source 3d skybox brushes excluded until their scene is converted
         std::size_t skybox_brushes = 0;
         std::size_t sides = 0;
         std::size_t skipped_brushes = 0;

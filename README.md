@@ -192,14 +192,14 @@ hltools model convert cstrike/models/props/crate.mdl models/crate.mdl -game cstr
 
 The Source `.mdl` must have its sibling `.vvd` and `.dx90.vtx`, `.dx80.vtx`, or
 `.vtx` file beside it. The converter reads LOD 0, embeds palettized skins up to
-512x512, preserves bones and supported animation sequences, and automatically
-splits geometry that exceeds GoldSrc's per-submodel vertex limit. Source models
-with versions 44 through 49 are supported.
+512x512, preserves bones and supported animations, and splits geometry that
+exceeds GoldSrc limits. Source model versions 44 through 49 are supported.
 
 `-game` points at the Source content directory used to resolve VMT/VTF skins
 from loose files and `_dir.vpk` archives. It is inferred when the input path is
 under a `models` directory. Unresolved skins are replaced with an obvious purple
 placeholder and reported after conversion. Use `-force` to overwrite an output.
+Texture filtering and supported render flags are preserved during conversion.
 
 ## Full-resolution skybox models
 
@@ -488,6 +488,58 @@ merged as authoritative hand-declared dependencies.
 | `-force` | Overwrite files already present below the output directory or replace an existing ZIP |
 | `-strict` | Fail without writing the package if any referenced resource is missing |
 
+### `bsp port`
+
+`bsp port` converts a Source BSP into an editable GoldSrc MAP and its companion
+assets:
+
+```powershell
+hltools bsp port source.bsp staging/map.map -game path/to/game -game path/to/hl2 -toolwad sdhlt.wad
+```
+
+What we currently support:
+
+- Original brush and brushside geometry
+- Entity and light conversion, including one player start
+- Detail, water, transparent, masked, and additive brushes
+- Displacements converted to `func_detail` with simpler collision
+- Materials converted to a companion WAD
+- Materials and models loaded from the BSP, `-game` directories, and VPK files
+- Studio model conversion and static prop placement
+- Optional `.phy` collision converted to brushes
+- 2D skybox export to `gfx/env`
+- Unlit material support for RAD
+- MAP, WAD, model, and sky output in a game-directory layout
+
+Source `sky_camera` scenes are not converted yet. `-toolwad` supplies compiler
+textures such as `NULL`, `CLIP`, and `SKY`.
+
+For the best sky quality, use `-skysize` to export the skybox at its full
+resolution, then build a 3D model skybox with `hltools model skybox`. See
+[Full-resolution skybox models](#full-resolution-skybox-models).
+
+Options:
+
+| Option | Effect | Default |
+|---|---|---:|
+| `-game <dir>` | Add a content search root; repeatable | None |
+| `-toolwad <file>` | Add a compiler-texture WAD | None |
+| `-skysize <n>` | Set sky-face size (`64..4096`); `0` skips export | `256` |
+| `-skyexposure <n>` | Scale HDR sky brightness | `1.0` |
+| `-maxtexsize <n>` | Cap WAD textures (`16..512`, step 16) | `512` |
+| `-fulltex <material>` | Bypass `-maxtexsize`; repeatable | None |
+| `-maxskinsize <n>` | Cap model skins (`16..512`, step 16) | `512` |
+| `-chunkskins <n>` | Split model skins into `1`, `2`, `4`, or `8` tiles per axis | `1` (off) |
+| `-sharedpalette` | Share one palette across material tiles | Off |
+| `-tilearea <10..100>` | Limit the surface area receiving dedicated tiles | `100` |
+| `-phyclip` | Convert `.phy` collision to brush entities | Off |
+
+Skin tiling avoids downscaling large model skins. Lower `-chunkskins` or
+`-tilearea` when model size or draw calls matter more than texture detail.
+
+`-phyclip` converts prop collision into brushes. Complex collision can exceed
+GoldSrc's 32,767 clipnode limit.
+
 ### `wad`
 
 List WAD or BSP textures:
@@ -528,26 +580,23 @@ The output is a deterministic 24 bit RGB atlas containing every lit face and eve
 
 ### `decompile`
 
+`decompile` restores a GoldSrc BSP as a Valve 220 MAP:
+
 ```powershell
 hltools decompile maps/example.bsp decompiled/example.map
 hltools decompile maps/example.bsp decompiled/example.map -wad decompiled/example.wad
 ```
 
-#### GoldSrc BSPs
+If the BSP contains an hltools source archive, its root MAP is restored directly.
+Otherwise the decompiler reconstructs convex brushes from the hull-0 BSP tree.
+Embedded textures are written to a companion WAD and added to worldspawn.
 
-When an hltools source archive is present, the decompiler writes its root MAP
-directly. Otherwise it reconstructs convex Valve 220 brushes from the BSP
-hull-0 tree. During reconstruction, embedded source textures are written to a
-companion WAD automatically and the resulting path is added to worldspawn.
-`-reconstruct` skips the archived MAP and reconstructs the map normally.
-`-wad` overrides the companion WAD path and `-force` permits overwriting.
+`-reconstruct` ignores the archive and forces BSP reconstruction. `-wad` changes
+the companion WAD path, while `-force` allows existing outputs to be replaced.
 
-You can inspect the embedded archive with 7-Zip by opening the BSP like a normal
-archive.
+#### Embedded MAP archive
 
-#### Embedded source format
-
-Optional data follows the aligned end of the last standard lump:
+hltools stores the optional source archive after the standard BSP data:
 
 ```text
 [GoldSrc BSP][BSPX directory][HLTOOLS_EMBED_LOCATOR][ZIP to end of file]
@@ -562,31 +611,10 @@ uint32_t flags;        // reserved, zero
 uint64_t zip_offset;   // absolute file offset; ZIP continues to EOF
 ```
 
-Vanilla GoldSrc reads the standard lumps and ignores the trailing extension.
+Vanilla GoldSrc reads the standard lumps and ignores the appended data. Tools
+such as 7-Zip can open the archive directly from the BSP.
 
-### `bsp port`
-
-Source BSP porting is independent from GoldSrc decompilation:
-
-```powershell
-hltools bsp port source.bsp staging/map.map -game path/to/game -game path/to/hl2 -toolwad sdhlt.wad
-```
-
-Source BSPs retain their original brushes and brushsides, so hltools ports those
-records directly instead of reconstructing solids from the BSP tree. It remaps
-entities to GoldSrc equivalents, tessellates displacements into `func_detail`
-triangle brushes with simplified collision brushes, and drops 3D skybox brushes,
-which have no GoldSrc equivalent.
-
-Materials and referenced studio models are resolved from the BSP pakfile first,
-then from each repeatable `-game` content root and its VPK archives. Materials
-are converted into a companion WAD, static props become `cycler_sprite`
-entities, and converted models retain their `models/` paths. The Source 2D
-skybox is exported beneath `gfx/env/`. These paths are rooted beside the output
-MAP, producing a folder that can be used as GoldSrc game content. `-toolwad`
-adds a WAD providing compiler textures such as `NULL`, `CLIP`, and `SKY`.
-
-The decompilation approach is based primarily on [HalfLife.UnifiedSdk.MapDecompiler](https://github.com/twhl-community/HalfLife.UnifiedSdk.MapDecompiler/)
+The reconstruction is based on [HalfLife.UnifiedSdk.MapDecompiler](https://github.com/twhl-community/HalfLife.UnifiedSdk.MapDecompiler/).
 
 ## Map compiler reference
 

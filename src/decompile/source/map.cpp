@@ -414,11 +414,9 @@ namespace decompile
             return ranges;
         }
 
-        // worldspawn's world_mins/world_maxs give the playable extent. a source
-        // 3d skybox is a small separate scene outside that box, which goldsrc
-        // cannot use: it would be unreachable brushes that still cost tree,
-        // faces and lighting, and its 8192 unit sky slabs overflow a leaf's
-        // face list once subdivided. so brushes outside the box are dropped.
+        // world_mins/world_maxs give the playable extent. A Source 3d skybox is
+        // a separate scene outside it. Porting needs a coordinate transform, so
+        // exclude those brushes until that conversion is supported.
         //
         // only when the map has a sky_camera, though. a map's own sky shell
         // also sits outside the playable extent, so culling without that check
