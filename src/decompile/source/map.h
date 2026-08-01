@@ -42,28 +42,15 @@ namespace decompile
         // rebuild the map's studio models as goldsrc models and place them as
         // entities. off leaves the map brush only.
         bool convert_models = true;
-        // maximum edge length of a converted model's embedded skins. goldsrc
-        // stores skins inside each model, so a material shared by many models is
-        // paid for once per model: this is the only lever on the model payload.
+        // maximum edge length of converted model skins.
         unsigned max_skin_size = 512;
-        // a source texture larger than max_skin_size is cut into up to this many
-        // tiles on each axis (1, 2, 4 or 8) and the mesh is split to match, so the
-        // model keeps up to chunk_level x max_skin_size of its resolution
-        // instead of being squeezed into one skin. 1 disables tiling.
+        // maximum tiles per axis; 1 disables tiling.
         int skin_chunk_level = 1;
-        // share one palette across a material's tiles. seamless, but 256
-        // colours then cover every tile instead of one, which costs roughly
-        // half the colour resolution per tile. off keeps each tile's own
-        // palette and accepts a faint line at tile boundaries.
+        // use one palette per material instead of per tile.
         bool shared_tile_palette = false;
-        // fraction of a model's surface area that gets its own full
-        // resolution tile; the remainder shares one untiled skin per
-        // material. uv coverage is very uneven, so trimming the tail cuts
-        // video memory and draw calls hard for almost no visible loss.
+        // fraction of surface area receiving dedicated tiles.
         float tile_area_keep = 1.0f;
-        // turn terminal convex pieces from SOLID_VPHYSICS static props' .phy
-        // sidecars into invisible solid brush entities. off by default
-        // because dense Source collision can exceed GoldSrc's clipnode budget.
+        // rebuild .phy convexes as invisible solid brush entities.
         bool physics_clips = false;
     };
 

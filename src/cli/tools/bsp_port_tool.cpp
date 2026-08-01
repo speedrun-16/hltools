@@ -36,6 +36,11 @@ namespace tools
                 "  -skyexposure <n>    HDR sky brightness, 0.01..16 (default 1)\n"
                 "  -maxtexsize <n>     WAD texture cap, 16..512 in steps of 16\n"
                 "  -fulltex <material> bypass the texture cap; repeatable\n"
+                "  -maxskinsize <n>    model skin cap, 16..512 in steps of 16\n"
+                "  -chunkskins <n>     tiles per model-skin axis: 1, 2, 4, or 8\n"
+                "  -sharedpalette      share palettes across material tiles\n"
+                "  -tilearea <n>       surface area receiving tiles, 10..100\n"
+                "  -phyclip            convert .phy collision to brush entities\n"
                 "  -force              overwrite output files\n");
         }
 
@@ -112,7 +117,10 @@ namespace tools
                      std::string wad_path, const std::vector<std::string> &game_dirs,
                      const std::string &tool_wad, unsigned sky_size,
                      double sky_exposure, unsigned max_texture_size,
-                     const std::vector<std::string> &full_size_textures, bool force)
+                     unsigned max_skin_size, int skin_chunk_level,
+                     bool shared_tile_palette, float tile_area_keep,
+                     const std::vector<std::string> &full_size_textures,
+                     bool physics_clips, bool force)
         {
             format::source_map_data source;
             std::string error;
@@ -135,7 +143,12 @@ namespace tools
             options.sky_size = sky_size;
             options.sky_exposure = sky_exposure;
             options.max_texture_size = max_texture_size;
+            options.max_skin_size = max_skin_size;
+            options.skin_chunk_level = skin_chunk_level;
+            options.shared_tile_palette = shared_tile_palette;
+            options.tile_area_keep = tile_area_keep;
             options.full_size_textures = full_size_textures;
+            options.physics_clips = physics_clips;
             options.additional_wad =
                 stdfs::absolute(stdfs::path(wad_path)).lexically_normal().string();
             if (!tool_wad.empty())
@@ -206,6 +219,13 @@ namespace tools
             if (result.models.missing_skins != 0)
                 logging::console("warning: %zu model skins unresolved\n",
                                  result.models.missing_skins);
+            if (result.models.chunked_skins != 0)
+                logging::console("split %zu model skins into tiles\n",
+                                 result.models.chunked_skins);
+            if (result.physics_clip_brushes != 0)
+                logging::console("rebuilt %zu props as %zu collision brushes\n",
+                                 result.physics_clip_props,
+                                 result.physics_clip_brushes);
             logging::console("%zu brush models of %d\n", result.brush_models + 1,
                              limits::max_map_models);
             if ((int)result.brush_models + 1 > limits::max_map_models)
@@ -237,7 +257,12 @@ namespace tools
         unsigned sky_size = 256;
         double sky_exposure = 1.0;
         unsigned max_texture_size = 512;
+        unsigned max_skin_size = 512;
+        int skin_chunk_level = 1;
+        bool shared_tile_palette = false;
+        float tile_area_keep = 1.0f;
         std::vector<std::string> full_size_textures;
+        bool physics_clips = false;
         std::vector<std::string> positional;
         for (int i = 1; i < argc; i++)
         {
@@ -246,10 +271,23 @@ namespace tools
                 force = true;
                 continue;
             }
+            if (str::iequals(argv[i], "-phyclip"))
+            {
+                physics_clips = true;
+                continue;
+            }
+            if (str::iequals(argv[i], "-sharedpalette"))
+            {
+                shared_tile_palette = true;
+                continue;
+            }
             if (str::iequals(argv[i], "-wad") || str::iequals(argv[i], "-toolwad")
                 || str::iequals(argv[i], "-game") || str::iequals(argv[i], "-skysize")
                 || str::iequals(argv[i], "-skyexposure")
                 || str::iequals(argv[i], "-maxtexsize")
+                || str::iequals(argv[i], "-maxskinsize")
+                || str::iequals(argv[i], "-chunkskins")
+                || str::iequals(argv[i], "-tilearea")
                 || str::iequals(argv[i], "-fulltex"))
             {
                 const std::string option = argv[i];
@@ -292,6 +330,42 @@ namespace tools
                     }
                     max_texture_size = (unsigned)value;
                 }
+                else if (str::iequals(option.c_str(), "-maxskinsize"))
+                {
+                    char *end = nullptr;
+                    long value = std::strtol(argv[i], &end, 10);
+                    if (!end || *end != '\0' || value < 16 || value > 512
+                        || value % 16 != 0)
+                    {
+                        logging::console("bsp port: -maxskinsize expects a multiple "
+                                         "of 16 from 16..512\n");
+                        return 1;
+                    }
+                    max_skin_size = (unsigned)value;
+                }
+                else if (str::iequals(option.c_str(), "-chunkskins"))
+                {
+                    char *end = nullptr;
+                    long value = std::strtol(argv[i], &end, 10);
+                    if (!end || *end != '\0'
+                        || (value != 1 && value != 2 && value != 4 && value != 8))
+                    {
+                        logging::console("bsp port: -chunkskins expects 1, 2, 4, or 8\n");
+                        return 1;
+                    }
+                    skin_chunk_level = (int)value;
+                }
+                else if (str::iequals(option.c_str(), "-tilearea"))
+                {
+                    char *end = nullptr;
+                    double value = std::strtod(argv[i], &end);
+                    if (!end || *end != '\0' || value < 10.0 || value > 100.0)
+                    {
+                        logging::console("bsp port: -tilearea expects 10..100\n");
+                        return 1;
+                    }
+                    tile_area_keep = (float)(value / 100.0);
+                }
                 else
                 {
                     char *end = nullptr;
@@ -327,6 +401,7 @@ namespace tools
         }
         return run_port(positional[0], positional[1], wad_path, game_dirs,
                         tool_wad, sky_size, sky_exposure, max_texture_size,
-                        full_size_textures, force);
+                        max_skin_size, skin_chunk_level, shared_tile_palette,
+                        tile_area_keep, full_size_textures, physics_clips, force);
     }
 }
