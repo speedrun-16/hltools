@@ -26,5 +26,8 @@ namespace format
     // entity's body value, so splitting there would hide the other pieces).
     constexpr int goldsrc_max_studio_verts = 2048;
     constexpr int goldsrc_max_studio_bodyparts = 32;
+    // embedded skins per model. tiling a large texture spends these quickly, so
+    // the writer refuses rather than producing a model the engine truncates.
+    constexpr int goldsrc_max_studio_skins = 100;
     constexpr int goldsrc_studio_version = 10;
 }

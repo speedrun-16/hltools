@@ -4,7 +4,9 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <tuple>
 
 #include "common/binary.h"
 
@@ -103,6 +105,12 @@ namespace format
                 normal_map.assign(model.vertices.size(), -1);
                 int normal_start = (int)out.normal_bone.size();
                 out.mesh_normal_start.push_back(normal_start);
+                bool ignores_normals = mesh.material >= 0
+                    && (std::size_t)mesh.material < model.textures.size()
+                    && (model.textures[(std::size_t)mesh.material].flags
+                        & studio_nf_fullbright) != 0
+                    && (model.textures[(std::size_t)mesh.material].flags
+                        & studio_nf_chrome) == 0;
 
                 for (int index : mesh.indices)
                 {
@@ -131,8 +139,14 @@ namespace format
 
                     if (normal_map[i] >= 0)
                         continue;
-                    vec3_key normal{{vertex.normal[0], vertex.normal[1],
-                                     vertex.normal[2]}};
+                    // fullbright bypasses StudioLighting, and only chrome reads
+                    // the normal for texture coordinates. keeping one harmless
+                    // normal avoids walking and transforming thousands of values
+                    // which cannot affect the rendered result.
+                    vec3_key normal = ignores_normals
+                        ? vec3_key{{0, 0, 1}}
+                        : vec3_key{{vertex.normal[0], vertex.normal[1],
+                                    vertex.normal[2]}};
                     auto nit = normal_ids.find(normal);
                     if (nit == normal_ids.end())
                     {
@@ -160,108 +174,275 @@ namespace format
             geometry geo;
         };
 
-        // greedily packs triangles into parts. a triangle is never split, and
-        // material grouping is preserved inside each part, so the only visible
-        // effect of a split is more bodyparts.
+        struct triangle_ref
+        {
+            int material = 0;
+            int vertices[3] = {};
+        };
+
+        // packs connected triangles together across material boundaries. Skin
+        // tiling creates interleaved meshes which often use the same positions;
+        // walking one material at a time made every tiled boundary land in
+        // several bodyparts, so GoldSrc transformed those positions repeatedly.
+        // a topology walk keeps shared positions in the same part whenever the
+        // 2048-position ceiling permits it. Triangles and attributes do not
+        // change; only their bodypart assignment does.
         std::vector<part> partition_model(const studio_model &model, int max_verts)
         {
-            std::vector<part> parts;
-            parts.emplace_back();
-            std::map<vec3_key, int> used;
-
-            auto flush = [&]() {
-                if (!parts.back().meshes.empty())
-                {
-                    parts.emplace_back();
-                    used.clear();
-                }
-            };
-
+            std::vector<triangle_ref> triangles;
             for (const studio_mesh &source : model.meshes)
-            {
                 for (std::size_t t = 0; t + 2 < source.indices.size(); t += 3)
                 {
-                    vec3_key keys[3];
+                    triangle_ref triangle;
+                    triangle.material = source.material;
+                    for (int k = 0; k < 3; k++)
+                        triangle.vertices[k] = source.indices[t + (std::size_t)k];
+                    triangles.push_back(triangle);
+                }
+
+            std::vector<std::array<vec3_key, 3>> keys(triangles.size());
+            std::map<vec3_key, std::vector<int>> touching;
+            for (std::size_t t = 0; t < triangles.size(); t++)
+                for (int k = 0; k < 3; k++)
+                {
+                    const studio_vertex &vertex =
+                        model.vertices[(std::size_t)triangles[t].vertices[k]];
+                    keys[t][(std::size_t)k] = vec3_key{{vertex.position[0],
+                                                        vertex.position[1],
+                                                        vertex.position[2]}};
+                    bool duplicate = false;
+                    for (int j = 0; j < k; j++)
+                        if (!(keys[t][(std::size_t)j] < keys[t][(std::size_t)k])
+                            && !(keys[t][(std::size_t)k] < keys[t][(std::size_t)j]))
+                            duplicate = true;
+                    if (!duplicate)
+                        touching[keys[t][(std::size_t)k]].push_back((int)t);
+                }
+
+            std::vector<part> parts;
+            std::vector<bool> assigned(triangles.size(), false);
+            std::vector<int> queued_generation(triangles.size(), 0);
+            std::size_t remaining = triangles.size();
+            int generation = 0;
+            while (remaining != 0)
+            {
+                parts.emplace_back();
+                part &output = parts.back();
+                std::map<vec3_key, int> used;
+                std::deque<int> queue;
+                std::size_t seed_cursor = 0;
+                generation++;
+
+                auto fresh_positions = [&](int triangle) {
                     int fresh = 0;
                     for (int k = 0; k < 3; k++)
                     {
-                        std::size_t i = (std::size_t)source.indices[t + (std::size_t)k];
-                        if (i >= model.vertices.size())
+                        const vec3_key &key = keys[(std::size_t)triangle][(std::size_t)k];
+                        if (used.count(key))
                             continue;
-                        const studio_vertex &vertex = model.vertices[i];
-                        keys[k] = vec3_key{{vertex.position[0], vertex.position[1],
-                                            vertex.position[2]}};
-                        if (!used.count(keys[k]))
-                        {
-                            // a triangle can repeat a position within itself
-                            bool duplicate = false;
-                            for (int j = 0; j < k; j++)
-                                if (!(keys[j] < keys[k]) && !(keys[k] < keys[j]))
-                                    duplicate = true;
-                            if (!duplicate)
-                                fresh++;
-                        }
+                        bool duplicate = false;
+                        for (int j = 0; j < k; j++)
+                            if (!(keys[(std::size_t)triangle][(std::size_t)j] < key)
+                                && !(key < keys[(std::size_t)triangle][(std::size_t)j]))
+                                duplicate = true;
+                        if (!duplicate)
+                            fresh++;
                     }
-                    if ((int)used.size() + fresh > max_verts)
-                        flush();
+                    return fresh;
+                };
+                auto enqueue = [&](int triangle) {
+                    if (!assigned[(std::size_t)triangle]
+                        && queued_generation[(std::size_t)triangle] != generation)
+                    {
+                        queued_generation[(std::size_t)triangle] = generation;
+                        queue.push_back(triangle);
+                    }
+                };
 
-                    for (int k = 0; k < 3; k++)
-                        used.emplace(keys[k], 0);
+                for (std::size_t t = 0; t < triangles.size(); t++)
+                    if (!assigned[t])
+                    {
+                        enqueue((int)t);
+                        break;
+                    }
 
-                    // keep one mesh per material inside the part
-                    std::vector<studio_mesh> &meshes = parts.back().meshes;
-                    studio_mesh *target = nullptr;
-                    for (studio_mesh &mesh : meshes)
-                        if (mesh.material == source.material)
+                for (;;)
+                {
+                    while (!queue.empty())
+                    {
+                        int triangle = queue.front();
+                        queue.pop_front();
+                        if (assigned[(std::size_t)triangle]
+                            || (int)used.size() + fresh_positions(triangle) > max_verts)
+                            continue;
+
+                        const triangle_ref &source = triangles[(std::size_t)triangle];
+                        studio_mesh *target = nullptr;
+                        for (studio_mesh &mesh : output.meshes)
+                            if (mesh.material == source.material)
+                            {
+                                target = &mesh;
+                                break;
+                            }
+                        if (target == nullptr)
                         {
-                            target = &mesh;
+                            studio_mesh mesh;
+                            mesh.material = source.material;
+                            output.meshes.push_back(std::move(mesh));
+                            target = &output.meshes.back();
+                        }
+                        for (int k = 0; k < 3; k++)
+                        {
+                            target->indices.push_back(source.vertices[k]);
+                            const vec3_key &key =
+                                keys[(std::size_t)triangle][(std::size_t)k];
+                            used.emplace(key, 0);
+                            for (int neighbour : touching[key])
+                                enqueue(neighbour);
+                        }
+                        assigned[(std::size_t)triangle] = true;
+                        remaining--;
+                    }
+
+                    int seed = -1;
+                    while (seed_cursor < triangles.size())
+                    {
+                        std::size_t candidate = seed_cursor++;
+                        if (!assigned[candidate]
+                            && (int)used.size() + fresh_positions((int)candidate)
+                                <= max_verts)
+                        {
+                            seed = (int)candidate;
                             break;
                         }
-                    if (target == nullptr)
-                    {
-                        studio_mesh mesh;
-                        mesh.material = source.material;
-                        meshes.push_back(std::move(mesh));
-                        target = &meshes.back();
                     }
-                    for (int k = 0; k < 3; k++)
-                        target->indices.push_back(source.indices[t + (std::size_t)k]);
+                    if (seed < 0)
+                        break;
+                    enqueue(seed);
                 }
             }
 
-            if (parts.back().meshes.empty() && parts.size() > 1)
-                parts.pop_back();
             for (part &p : parts)
                 p.geo = split_vertices(model, p.meshes);
             return parts;
         }
 
-        // one triangle per strip. the command stream also allows longer strips
-        // and fans, which only saves draw time, never correctness.
+        struct command_vertex
+        {
+            std::int16_t position = 0;
+            std::int16_t normal = 0;
+            std::int16_t s = 0;
+            std::int16_t t = 0;
+
+            bool operator<(const command_vertex &other) const
+            {
+                return std::tie(position, normal, s, t)
+                    < std::tie(other.position, other.normal, other.s, other.t);
+            }
+        };
+
+        command_vertex make_command_vertex(const studio_model &model, int index,
+                                            const geometry &geo,
+                                            std::size_t mesh_index,
+                                            unsigned width, unsigned height)
+        {
+            const studio_vertex &vertex = model.vertices[(std::size_t)index];
+            command_vertex out;
+            out.position = (std::int16_t)geo.vertex_to_position[(std::size_t)index];
+            out.normal = (std::int16_t)
+                geo.mesh_vertex_to_normal[mesh_index][(std::size_t)index];
+            // source stores uvs normalized; goldsrc stores texel columns and rows
+            // directly in the command stream
+            out.s = (std::int16_t)std::lround(vertex.u * (float)width);
+            out.t = (std::int16_t)std::lround(vertex.v * (float)height);
+            return out;
+        }
+
+        void append_command_vertex(std::vector<std::int16_t> &commands,
+                                   const command_vertex &vertex)
+        {
+            commands.push_back(vertex.position);
+            commands.push_back(vertex.normal);
+            commands.push_back(vertex.s);
+            commands.push_back(vertex.t);
+        }
+
+        // source commonly stores a tessellated surface as independent triangle
+        // pairs. a four-vertex goldsrc strip draws the same pair while submitting
+        // two fewer command vertices. matching the complete command vertex,
+        // including its normal and rounded texel coordinates, keeps UV seams
+        // and hard edges from being joined accidentally.
         std::vector<std::int16_t> build_triangle_commands(const studio_model &model,
                                                           const studio_mesh &mesh,
                                                           const geometry &geo,
                                                           std::size_t mesh_index,
                                                           unsigned width, unsigned height)
         {
+            using triangle = std::array<command_vertex, 3>;
+            using edge = std::pair<command_vertex, command_vertex>;
+            using continuation = std::pair<std::size_t, command_vertex>;
+
+            std::vector<triangle> triangles;
+            triangles.reserve(mesh.indices.size() / 3);
+            std::map<edge, std::vector<continuation>> continuations;
+            for (std::size_t at = 0; at + 2 < mesh.indices.size(); at += 3)
+            {
+                triangle tri;
+                for (int k = 0; k < 3; k++)
+                    tri[(std::size_t)k] = make_command_vertex(
+                        model, mesh.indices[at + (std::size_t)k], geo, mesh_index,
+                        width, height);
+                std::size_t index = triangles.size();
+                triangles.push_back(tri);
+                for (int k = 0; k < 3; k++)
+                    continuations[{tri[(std::size_t)k], tri[(std::size_t)((k + 1) % 3)]}]
+                        .push_back({index, tri[(std::size_t)((k + 2) % 3)]});
+            }
+
             std::vector<std::int16_t> commands;
             commands.reserve(mesh.indices.size() * 4 + mesh.indices.size() / 3 + 1);
-            for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3)
+            std::vector<bool> emitted(triangles.size(), false);
+            for (std::size_t t = 0; t < triangles.size(); t++)
             {
-                commands.push_back(3);
-                for (int k = 0; k < 3; k++)
+                if (emitted[t])
+                    continue;
+
+                const triangle &tri = triangles[t];
+                int rotation = -1;
+                continuation joined{};
+                for (int k = 0; k < 3 && rotation < 0; k++)
                 {
-                    int index = mesh.indices[t + (std::size_t)k];
-                    const studio_vertex &vertex = model.vertices[(std::size_t)index];
-                    // source stores uvs normalized; goldsrc stores texel columns
-                    // and rows directly in the command stream
-                    float s = vertex.u * (float)width;
-                    float v = vertex.v * (float)height;
-                    commands.push_back((std::int16_t)geo.vertex_to_position[(std::size_t)index]);
-                    commands.push_back((std::int16_t)
-                        geo.mesh_vertex_to_normal[mesh_index][(std::size_t)index]);
-                    commands.push_back((std::int16_t)std::lround(s));
-                    commands.push_back((std::int16_t)std::lround(v));
+                    const command_vertex &b = tri[(std::size_t)((k + 1) % 3)];
+                    const command_vertex &c = tri[(std::size_t)((k + 2) % 3)];
+                    auto found = continuations.find({c, b});
+                    if (found == continuations.end())
+                        continue;
+                    for (const continuation &candidate : found->second)
+                        if (candidate.first != t && !emitted[candidate.first])
+                        {
+                            rotation = k;
+                            joined = candidate;
+                            break;
+                        }
+                }
+
+                emitted[t] = true;
+                if (rotation >= 0)
+                {
+                    emitted[joined.first] = true;
+                    commands.push_back(4);
+                    append_command_vertex(commands, tri[(std::size_t)rotation]);
+                    append_command_vertex(commands,
+                                          tri[(std::size_t)((rotation + 1) % 3)]);
+                    append_command_vertex(commands,
+                                          tri[(std::size_t)((rotation + 2) % 3)]);
+                    append_command_vertex(commands, joined.second);
+                }
+                else
+                {
+                    commands.push_back(3);
+                    for (const command_vertex &vertex : tri)
+                        append_command_vertex(commands, vertex);
                 }
             }
             commands.push_back(0); // end of the stream
@@ -322,6 +503,29 @@ namespace format
         if (model.meshes.empty())
         {
             set_error(error, "a studio model needs at least one mesh");
+            return false;
+        }
+        for (const studio_mesh &mesh : model.meshes)
+        {
+            if (mesh.indices.size() % 3 != 0)
+            {
+                set_error(error, "studio mesh index count is not a triangle list");
+                return false;
+            }
+            for (int index : mesh.indices)
+                if (index < 0 || (std::size_t)index >= model.vertices.size())
+                {
+                    set_error(error, "studio mesh contains an invalid vertex index");
+                    return false;
+                }
+        }
+
+        if (model.textures.size() > (std::size_t)goldsrc_max_studio_skins)
+        {
+            set_error(error, "model carries " + std::to_string(model.textures.size())
+                                 + " skins, above the maximum of "
+                                 + std::to_string(goldsrc_max_studio_skins)
+                                 + " (lower the skin chunk level)");
             return false;
         }
 

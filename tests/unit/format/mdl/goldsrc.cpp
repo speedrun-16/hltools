@@ -169,6 +169,89 @@ suite("unit.format.goldsrc_mdl")
         expect(last == 0);
     }
 
+    test("goldsrc_mdl.pairs adjacent triangles into an exact strip")
+    {
+        format::studio_model model = make_model();
+        model.vertices.clear();
+        model.meshes[0].indices = {0, 1, 2, 2, 1, 3};
+        const float positions[4][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+        for (int i = 0; i < 4; i++)
+        {
+            format::studio_vertex vertex;
+            vertex.position[0] = positions[i][0];
+            vertex.position[1] = positions[i][1];
+            vertex.normal[2] = 1;
+            vertex.u = positions[i][0];
+            vertex.v = positions[i][1];
+            model.vertices.push_back(vertex);
+        }
+
+        std::vector<byte> out;
+        require(format::write_goldsrc_model(model, out));
+        std::size_t bodypart = (std::size_t)i32_at(out, 208);
+        std::size_t written_model = (std::size_t)i32_at(out, bodypart + 72);
+        std::size_t mesh = (std::size_t)i32_at(out, written_model + 76);
+        expect(i32_at(out, mesh) == 2);
+
+        std::size_t commands = (std::size_t)i32_at(out, mesh + 4);
+        expect((std::int16_t)u16_at(out, commands) == 4);
+        expect((std::int16_t)u16_at(out, commands + 2 + 4 * 8) == 0);
+    }
+
+    test("goldsrc_mdl.rejects an invalid triangle list before indexing it")
+    {
+        format::studio_model model = make_model();
+        model.meshes[0].indices = {0, 1};
+        std::vector<byte> out;
+        std::string error;
+        expect_false(format::write_goldsrc_model(model, out, &error));
+        expect(error == "studio mesh index count is not a triangle list");
+
+        model.meshes[0].indices = {0, 1, 99};
+        expect_false(format::write_goldsrc_model(model, out, &error));
+        expect(error == "studio mesh contains an invalid vertex index");
+    }
+
+    test("goldsrc_mdl.rejects more skins than the engine can address")
+    {
+        format::studio_model model = make_model();
+        while (model.textures.size()
+               <= (std::size_t)format::goldsrc_max_studio_skins)
+            model.textures.push_back(model.textures[0]);
+        std::vector<byte> out;
+        std::string error;
+        expect_false(format::write_goldsrc_model(model, out, &error));
+        expect(error.find("above the maximum") != std::string::npos);
+    }
+
+    test("goldsrc_mdl.does not strip across a uv seam")
+    {
+        format::studio_model model = make_model();
+        model.vertices.clear();
+        model.meshes[0].indices = {0, 1, 2, 3, 4, 5};
+        const float positions[6][2] = {
+            {0, 0}, {1, 0}, {0, 1}, {0, 1}, {1, 0}, {1, 1}};
+        for (int i = 0; i < 6; i++)
+        {
+            format::studio_vertex vertex;
+            vertex.position[0] = positions[i][0];
+            vertex.position[1] = positions[i][1];
+            vertex.normal[2] = 1;
+            vertex.u = positions[i][0] + (i >= 3 ? 0.25f : 0.0f);
+            vertex.v = positions[i][1];
+            model.vertices.push_back(vertex);
+        }
+
+        std::vector<byte> out;
+        require(format::write_goldsrc_model(model, out));
+        std::size_t bodypart = (std::size_t)i32_at(out, 208);
+        std::size_t written_model = (std::size_t)i32_at(out, bodypart + 72);
+        std::size_t mesh = (std::size_t)i32_at(out, written_model + 76);
+        std::size_t commands = (std::size_t)i32_at(out, mesh + 4);
+        expect((std::int16_t)u16_at(out, commands) == 3);
+        expect((std::int16_t)u16_at(out, commands + 2 + 3 * 8) == 3);
+    }
+
     test("goldsrc_mdl.round trips an animated channel through the encoding")
     {
         std::vector<byte> out;
@@ -240,6 +323,84 @@ suite("unit.format.goldsrc_mdl")
                 total_tris += i32_at(out, mesh_at + (std::size_t)m * 20);
         }
         expect(total_tris == triangles);
+    }
+
+    test("goldsrc_mdl.packs shared positions across material boundaries")
+    {
+        format::studio_model model = make_model();
+        model.vertices.clear();
+        model.meshes.clear();
+        model.textures.push_back(model.textures[0]);
+        model.textures[1].name = "detail.bmp";
+
+        constexpr int side = 50;
+        for (int y = 0; y < side; y++)
+            for (int x = 0; x < side; x++)
+            {
+                format::studio_vertex vertex;
+                vertex.position[0] = (float)x;
+                vertex.position[1] = (float)y;
+                vertex.normal[2] = 1;
+                vertex.u = (float)x / (side - 1);
+                vertex.v = (float)y / (side - 1);
+                model.vertices.push_back(vertex);
+            }
+
+        format::studio_mesh first, second;
+        first.material = 0;
+        second.material = 1;
+        for (int y = 0; y + 1 < side; y++)
+            for (int x = 0; x + 1 < side; x++)
+            {
+                int a = y * side + x;
+                int b = a + 1;
+                int c = a + side;
+                int d = c + 1;
+                first.indices.insert(first.indices.end(), {a, b, c});
+                second.indices.insert(second.indices.end(), {c, b, d});
+            }
+        model.meshes = {std::move(first), std::move(second)};
+
+        std::vector<byte> out;
+        require(format::write_goldsrc_model(model, out));
+        std::int32_t bodyparts = i32_at(out, 204);
+        expect(bodyparts == 2);
+
+        std::size_t bodypart = (std::size_t)i32_at(out, 208);
+        int transformed_positions = 0;
+        for (std::int32_t bp = 0; bp < bodyparts; bp++)
+        {
+            std::size_t at = bodypart + (std::size_t)bp * 76;
+            std::size_t written_model = (std::size_t)i32_at(out, at + 72);
+            transformed_positions += i32_at(out, written_model + 80);
+        }
+        // the grid has 2500 positions. crossing one partition boundary may
+        // repeat its edge, but material order must not duplicate the whole grid.
+        expect(transformed_positions < 3000);
+    }
+
+    test("goldsrc_mdl.collapses normals which fullbright never reads")
+    {
+        format::studio_model model = make_model();
+        model.textures[0].flags = format::studio_nf_fullbright;
+        model.vertices[0].normal[0] = 1;
+        model.vertices[0].normal[2] = 0;
+        model.vertices[1].normal[1] = 1;
+        model.vertices[1].normal[2] = 0;
+
+        std::vector<byte> out;
+        require(format::write_goldsrc_model(model, out));
+        std::size_t bodypart = (std::size_t)i32_at(out, 208);
+        std::size_t written_model = (std::size_t)i32_at(out, bodypart + 72);
+        expect(i32_at(out, written_model + 92) == 1);
+
+        // chrome derives texture coordinates from normals even when the skin is
+        // fullbright, so that combination must retain the source normals.
+        model.textures[0].flags |= format::studio_nf_chrome;
+        require(format::write_goldsrc_model(model, out));
+        bodypart = (std::size_t)i32_at(out, 208);
+        written_model = (std::size_t)i32_at(out, bodypart + 72);
+        expect(i32_at(out, written_model + 92) == 3);
     }
 
     test("goldsrc_mdl.keeps a small model in a single bodypart")

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -133,17 +134,22 @@ suite("unit.model.skybox_model")
 
             if (i == 0)
             {
-                // gchimp reverses SMD winding and flips V before writing MDL.
-                // The first tile's first triangle is C,B,A after that transform.
+                // the two tile triangles share all four command attributes, so
+                // the writer may submit them as one exact four-vertex strip.
                 std::size_t commands =
                     (std::size_t)i32_at(mdl, mesh_at + 4);
-                expect(i16_at(mdl, commands) == 3);
-                expect(i16_at(mdl, commands + 6) == 15);  // C s
-                expect(i16_at(mdl, commands + 8) == 15);  // C t
-                expect(i16_at(mdl, commands + 14) == 1);  // B s
-                expect(i16_at(mdl, commands + 16) == 15); // B t
-                expect(i16_at(mdl, commands + 22) == 1);  // A s
-                expect(i16_at(mdl, commands + 24) == 1);  // A t
+                expect(i16_at(mdl, commands) == 4);
+                std::array<std::pair<std::int16_t, std::int16_t>, 4> uv;
+                for (std::size_t vertex = 0; vertex < uv.size(); vertex++)
+                {
+                    std::size_t at = commands + 2 + vertex * 8;
+                    uv[vertex] = {i16_at(mdl, at + 4), i16_at(mdl, at + 6)};
+                }
+                std::sort(uv.begin(), uv.end());
+                expect(uv[0] == std::make_pair<std::int16_t, std::int16_t>(1, 1));
+                expect(uv[1] == std::make_pair<std::int16_t, std::int16_t>(1, 15));
+                expect(uv[2] == std::make_pair<std::int16_t, std::int16_t>(15, 1));
+                expect(uv[3] == std::make_pair<std::int16_t, std::int16_t>(15, 15));
             }
         }
     }
