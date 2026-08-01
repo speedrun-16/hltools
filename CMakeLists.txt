@@ -191,6 +191,7 @@ add_library(hltools_format STATIC
     src/format/mdl/goldsrc/model.cpp
     src/format/mdl/source/model.cpp
     src/format/miptex/texture.cpp
+    src/format/phy/source/model.cpp
     src/format/rad/texlights.cpp
     src/format/vbsp/file.cpp
     src/format/vbsp/pakfile.cpp

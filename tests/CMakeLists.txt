@@ -83,6 +83,7 @@ add_hltools_unit(unit_format
         unit/format/rad_file.cpp
         unit/format/resample.cpp
         unit/format/mdl/source.cpp
+        unit/format/phy/source.cpp
     LIBRARIES hltools_format
     LABEL unit.format)
 
