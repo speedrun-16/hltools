@@ -74,4 +74,34 @@ suite("unit.format.quantize")
         expect(masked.pixels == plain.pixels);
         expect(masked.palette == plain.palette);
     }
+
+    test("quantize.fixed maps onto the supplied palette")
+    {
+        std::vector<byte> rgb = {250, 4, 3, 2, 245, 5};
+        std::array<std::array<byte, 3>, 256> palette{};
+        palette[10] = {255, 0, 0};
+        palette[20] = {0, 255, 0};
+        format::indexed_image out;
+        require(format::quantize_rgb_fixed(rgb.data(), nullptr, 128, 2, 1,
+                                           palette, out));
+        require(out.pixels.size() == 2);
+        expect(out.palette == palette);
+        expect(out.pixels[0] == 10);
+        expect(out.pixels[1] == 20);
+    }
+
+    test("quantize.fixed reserves palette index 255 for masked pixels")
+    {
+        std::vector<byte> rgb = {0, 0, 255, 255, 0, 0};
+        std::vector<byte> alpha = {255, 0};
+        std::array<std::array<byte, 3>, 256> palette{};
+        palette[1] = {0, 0, 250};
+        palette[255] = {0, 0, 255};
+        format::indexed_image out;
+        require(format::quantize_rgb_fixed(rgb.data(), alpha.data(), 128, 2, 1,
+                                           palette, out));
+        require(out.pixels.size() == 2);
+        expect(out.pixels[0] == 1);
+        expect(out.pixels[1] == 255);
+    }
 }

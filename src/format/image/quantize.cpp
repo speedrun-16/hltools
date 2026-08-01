@@ -212,6 +212,62 @@ namespace format
         return quantize(rgb, nullptr, 0, width, height, 256, out);
     }
 
+    bool quantize_rgb_fixed(const byte *rgb, const byte *alpha, byte threshold,
+                            unsigned width, unsigned height,
+                            const std::array<std::array<byte, 3>, 256> &palette,
+                            indexed_image &out)
+    {
+        if (rgb == nullptr || width == 0 || height == 0)
+            return false;
+
+        out.width = width;
+        out.height = height;
+        out.palette = palette;
+        std::size_t pixels = (std::size_t)width * height;
+        out.pixels.resize(pixels);
+
+        // the punch-out slot is not a colour to match against
+        int usable = alpha != nullptr ? (int)masked_index : 256;
+
+        std::unordered_map<unsigned, byte> cache;
+        cache.reserve(4096);
+        for (std::size_t i = 0; i < pixels; i++)
+        {
+            if (alpha != nullptr && alpha[i] < threshold)
+            {
+                out.pixels[i] = masked_index;
+                continue;
+            }
+            unsigned key = (unsigned)rgb[i * 3] | ((unsigned)rgb[i * 3 + 1] << 8)
+                | ((unsigned)rgb[i * 3 + 2] << 16);
+            auto found = cache.find(key);
+            if (found != cache.end())
+            {
+                out.pixels[i] = found->second;
+                continue;
+            }
+            int best = 0;
+            long best_distance = -1;
+            for (int p = 0; p < usable; p++)
+            {
+                long dr = (long)rgb[i * 3] - palette[(std::size_t)p][0];
+                long dg = (long)rgb[i * 3 + 1] - palette[(std::size_t)p][1];
+                long db = (long)rgb[i * 3 + 2] - palette[(std::size_t)p][2];
+                long distance = dr * dr + dg * dg + db * db;
+                if (best_distance < 0 || distance < best_distance)
+                {
+                    best_distance = distance;
+                    best = p;
+                    if (distance == 0)
+                        break;
+                }
+            }
+            cache.emplace(key, (byte)best);
+            out.pixels[i] = (byte)best;
+        }
+        return true;
+    }
+
     bool quantize_rgb_masked(const byte *rgb, const byte *alpha, byte threshold,
                              unsigned width, unsigned height, indexed_image &out)
     {

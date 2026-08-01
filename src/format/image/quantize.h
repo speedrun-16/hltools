@@ -18,4 +18,10 @@ namespace format
     // a '{' prefixed texture name is what makes the engine honour the mask.
     bool quantize_rgb_masked(const byte *rgb, const byte *alpha, byte threshold,
                              unsigned width, unsigned height, indexed_image &out);
+
+    // maps an image to an existing palette using nearest RGB colors.
+    bool quantize_rgb_fixed(const byte *rgb, const byte *alpha, byte threshold,
+                            unsigned width, unsigned height,
+                            const std::array<std::array<byte, 3>, 256> &palette,
+                            indexed_image &out);
 }
