@@ -157,7 +157,7 @@ namespace tools
 
             decompile::source_model_conversion conversion;
             std::string error;
-            if (!decompile::convert_source_model(source, game_dirs, conversion, &error))
+            if (!decompile::convert_source_model(source, game_dirs, 512, conversion, &error))
             {
                 logging::console("model convert: %s\n", error.c_str());
                 return 1;

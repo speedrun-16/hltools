@@ -1,6 +1,7 @@
 #include "models.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <set>
@@ -8,8 +9,10 @@
 
 #include "common/binary.h"
 #include "common/filesystem.h"
+#include "common/progress.h"
 #include "format/bsp/entity_lump.h"
 #include "format/image/quantize.h"
+#include "format/mdl/chunk_skins.h"
 #include "format/mdl/goldsrc/model.h"
 #include "format/mdl/source/model.h"
 #include "format/vbsp/data.h"
@@ -23,7 +26,9 @@ namespace decompile
     namespace
     {
         // goldsrc skins must be at most 512 on a side and a multiple of 16
-        constexpr unsigned max_skin_dim = 512;
+        constexpr unsigned goldsrc_max_skin_dim = 512;
+        // one texel gives bilinear filtering a neighbor across tile boundaries.
+        constexpr unsigned tile_border = 1;
 
         std::string to_lower(std::string s)
         {
@@ -52,33 +57,22 @@ namespace decompile
             return path;
         }
 
-        unsigned fit_dim(unsigned d)
+        unsigned clamp_skin_dim(unsigned cap)
+        {
+            if (cap < 16)
+                return 16;
+            if (cap > goldsrc_max_skin_dim)
+                return goldsrc_max_skin_dim;
+            return cap - (cap % 16);
+        }
+
+        unsigned fit_dim(unsigned d, unsigned cap)
         {
             if (d < 16)
                 return 16;
-            if (d > max_skin_dim)
-                return max_skin_dim;
+            if (d > cap)
+                return cap;
             return d - (d % 16);
-        }
-
-        std::vector<byte> resample(const std::vector<byte> &src, unsigned sw, unsigned sh,
-                                   unsigned dw, unsigned dh)
-        {
-            std::vector<byte> out((std::size_t)dw * dh * 3);
-            for (unsigned y = 0; y < dh; y++)
-            {
-                unsigned sy = sh ? (y * sh) / dh : 0;
-                for (unsigned x = 0; x < dw; x++)
-                {
-                    unsigned sx = sw ? (x * sw) / dw : 0;
-                    std::size_t s = ((std::size_t)sy * sw + sx) * 3;
-                    std::size_t o = ((std::size_t)y * dw + x) * 3;
-                    out[o] = src[s];
-                    out[o + 1] = src[s + 1];
-                    out[o + 2] = src[s + 2];
-                }
-            }
-            return out;
         }
 
         // pakfile, then loose content, then the game's vpk archives
@@ -122,12 +116,23 @@ namespace decompile
             }
         }
 
+        // decoded once before tiling.
+        struct material_source
+        {
+            bool ok = false;
+            int flags = 0;
+            unsigned width = 0, height = 0;
+            std::vector<byte> rgb, alpha;
+        };
+
         // the model's material names are relative to its cdmaterials list, so
         // every directory is tried until one resolves
-        bool resolve_skin(const content_source &content, const format::studio_model &model,
-                          const std::string &material, format::studio_texture &out)
+        bool load_material_source(const content_source &content,
+                                  const format::studio_model &model,
+                                  const std::string &material, unsigned decode_cap,
+                                  material_source &out)
         {
-            out.name = to_lower(material) + ".bmp";
+            out = material_source{};
 
             std::string basetexture;
             for (const std::string &dir : model.material_dirs)
@@ -139,11 +144,38 @@ namespace decompile
                 format::vmt_material vmt;
                 if (!format::parse_vmt(vmt_bytes, vmt))
                     continue;
-                basetexture = normalize(vmt.get("$basetexture"));
+
+                // a patch material overrides individual properties of a base
+                // material, so a property missing from the patch is looked up in
+                // the base, and the shader is always the base's
+                format::vmt_material base;
+                if (vmt.is_patch())
+                {
+                    std::vector<byte> base_bytes;
+                    std::string include = vmt.patch_include();
+                    if (!include.empty() && content.load(include, base_bytes))
+                        format::parse_vmt(base_bytes, base);
+                }
+                auto lookup = [&](const char *property)
+                {
+                    std::string value = vmt.get(property);
+                    return value.empty() ? base.get(property) : value;
+                };
+                const std::string &shader = vmt.is_patch() ? base.shader : vmt.shader;
+
+                basetexture = normalize(lookup("$basetexture"));
                 // an alpha cut material becomes a masked skin, the model
                 // equivalent of a '{' world texture
-                if (vmt.get("$alphatest") == "1")
+                if (lookup("$alphatest") == "1")
                     out.flags |= format::studio_nf_masked;
+                // match unlit rendering by bypassing both light sampling and
+                // per-vertex shading.
+                if (iequals(shader, "UnlitGeneric"))
+                    out.flags |= format::studio_nf_fullbright
+                               | format::studio_nf_flatshade;
+                // source draws blending from the material, goldsrc from the skin
+                if (lookup("$additive") == "1")
+                    out.flags |= format::studio_nf_additive;
                 break;
             }
             if (basetexture.empty())
@@ -164,34 +196,222 @@ namespace decompile
                 return false;
 
             format::vtf_image image;
-            if (!format::decode_vtf(vtf_bytes, max_skin_dim, image) || image.width == 0)
+            if (!format::decode_vtf(vtf_bytes, decode_cap, image) || image.width == 0)
                 return false;
 
-            unsigned w = fit_dim(image.width), h = fit_dim(image.height);
-            std::vector<byte> rgb = (w == image.width && h == image.height)
-                ? image.rgb
-                : resample(image.rgb, image.width, image.height, w, h);
-            std::vector<byte> alpha;
-            if (!image.alpha.empty())
+            out.width = image.width;
+            out.height = image.height;
+            out.rgb = std::move(image.rgb);
+            out.alpha = std::move(image.alpha);
+            out.ok = true;
+            return true;
+        }
+
+        // area averages an arbitrary source rectangle into a dim x dim image.
+        // the rectangle may reach outside the image, where the edge pixel is
+        // repeated: that is what gives a tile its border, so bilinear filtering
+        // at a tile edge has real texels to read instead of the next tile's.
+        void extract_region(const material_source &src, double u0, double u1,
+                            double v0, double v1, unsigned dst_w, unsigned dst_h,
+                            std::vector<byte> &out_rgb, std::vector<byte> &out_alpha)
+        {
+            out_rgb.assign((std::size_t)dst_w * dst_h * 3, 0);
+            bool has_alpha = !src.alpha.empty();
+            if (has_alpha)
+                out_alpha.assign((std::size_t)dst_w * dst_h, 255);
+            if (!src.width || !src.height || !dst_w || !dst_h)
+                return;
+
+            for (unsigned y = 0; y < dst_h; y++)
             {
-                alpha.assign((std::size_t)w * h, 255);
-                for (unsigned y = 0; y < h; y++)
-                    for (unsigned x = 0; x < w; x++)
+                double sy0 = v0 + (v1 - v0) * y / dst_h;
+                double sy1 = v0 + (v1 - v0) * (y + 1) / dst_h;
+                int iy0 = (int)std::floor(sy0), iy1 = (int)std::ceil(sy1);
+                if (iy1 <= iy0) iy1 = iy0 + 1;
+                for (unsigned x = 0; x < dst_w; x++)
+                {
+                    double sx0 = u0 + (u1 - u0) * x / dst_w;
+                    double sx1 = u0 + (u1 - u0) * (x + 1) / dst_w;
+                    int ix0 = (int)std::floor(sx0), ix1 = (int)std::ceil(sx1);
+                    if (ix1 <= ix0) ix1 = ix0 + 1;
+
+                    unsigned long long r = 0, g = 0, b = 0, a = 0, n = 0;
+                    for (int sy = iy0; sy < iy1; sy++)
                     {
-                        unsigned sy = image.height ? (y * image.height) / h : 0;
-                        unsigned sx = image.width ? (x * image.width) / w : 0;
-                        alpha[(std::size_t)y * w + x] =
-                            image.alpha[(std::size_t)sy * image.width + sx];
+                        int cy = sy < 0 ? 0
+                            : (sy >= (int)src.height ? (int)src.height - 1 : sy);
+                        for (int sx = ix0; sx < ix1; sx++)
+                        {
+                            int cx = sx < 0 ? 0
+                                : (sx >= (int)src.width ? (int)src.width - 1 : sx);
+                            std::size_t p = (std::size_t)cy * src.width + cx;
+                            r += src.rgb[p * 3];
+                            g += src.rgb[p * 3 + 1];
+                            b += src.rgb[p * 3 + 2];
+                            if (has_alpha)
+                                a += src.alpha[p];
+                            n++;
+                        }
                     }
+                    std::size_t o = (std::size_t)y * dst_w + x;
+                    out_rgb[o * 3] = (byte)(r / n);
+                    out_rgb[o * 3 + 1] = (byte)(g / n);
+                    out_rgb[o * 3 + 2] = (byte)(b / n);
+                    if (has_alpha)
+                        out_alpha[o] = (byte)(a / n);
+                }
+            }
+        }
+
+        // divide each axis independently and reserve a bilinear border.
+        format::tile_layout layout_for(const material_source &source,
+                                       unsigned max_skin, int chunk_level)
+        {
+            format::tile_layout layout;
+            if (!source.ok || chunk_level < 2 || max_skin <= 2 * tile_border)
+                return layout;
+
+            // never cut finer than the caller asked for
+            unsigned budget = max_skin;
+            for (int level = 1; level < chunk_level; level *= 2)
+                budget *= 2;
+
+            // keep a full max_skin content span; the border is resampled into it.
+            auto divide_axis = [&](unsigned native, int &count, float &core,
+                                   float &inset)
+            {
+                native = std::min(native, budget);
+                count = (int)((native + max_skin - 1) / max_skin);
+                if (count < 2)
+                    return;
+                // each ordinary tile covers max_skin source texels. the final
+                // tile is pulled back to the image edge and overlaps the prior
+                // one instead of shrinking or resampling a partial crop.
+                core = std::min(1.0f, (float)max_skin / (float)native);
+                inset = (float)tile_border / (float)max_skin;
+            };
+            divide_axis(source.width, layout.count_u, layout.core_u, layout.inset_u);
+            divide_axis(source.height, layout.count_v, layout.core_v, layout.inset_v);
+            return layout;
+        }
+
+        // builds one goldsrc skin from a tile of a decoded material
+        void build_chunk_texture(const material_source &source,
+                                 const format::skin_chunk &chunk,
+                                 const std::string &name, unsigned max_skin,
+                                 unsigned border,
+                                 const std::array<std::array<byte, 3>, 256> *shared,
+                                 format::studio_texture &out)
+        {
+            out.name = to_lower(name) + ".bmp";
+            out.flags = source.flags;
+            bool tiled = chunk.count_u > 1 || chunk.count_v > 1;
+            if (tiled)
+            {
+                // tile mipmaps bleed across unrelated edges; keep mip 0 only.
+                out.flags |= format::studio_nf_nomips;
             }
 
-            if ((out.flags & format::studio_nf_masked) && !alpha.empty())
-                format::quantize_rgb_masked(rgb.data(), alpha.data(), 128, w, h, out.image);
+            std::vector<byte> rgb, alpha;
+            unsigned w, h;
+            if (!tiled)
+            {
+                // untiled: the whole image, each axis fitted on its own
+                w = fit_dim(source.width, max_skin);
+                h = fit_dim(source.height, max_skin);
+                extract_region(source, 0, source.width, 0, source.height, w, h,
+                               rgb, alpha);
+            }
             else
             {
-                out.flags &= ~format::studio_nf_masked;
-                format::quantize_rgb(rgb.data(), w, h, out.image);
+                // the content region in source texels plus one neighbouring
+                // texel on each tiled side. that narrow crop is filtered into
+                // the legal skin dimensions.
+                w = chunk.count_u > 1 ? max_skin : fit_dim(source.width, max_skin);
+                h = chunk.count_v > 1 ? max_skin : fit_dim(source.height, max_skin);
+                double su0 = chunk.count_u > 1
+                    ? (double)chunk.origin_u * source.width : 0.0;
+                double sv0 = chunk.count_v > 1
+                    ? (double)chunk.origin_v * source.height : 0.0;
+                double su1 = chunk.count_u > 1
+                    ? su0 + (double)chunk.core_u * source.width : source.width;
+                double sv1 = chunk.count_v > 1
+                    ? sv0 + (double)chunk.core_v * source.height : source.height;
+                double border_u = chunk.count_u > 1 ? border : 0;
+                double border_v = chunk.count_v > 1 ? border : 0;
+                extract_region(source, su0 - border_u, su1 + border_u,
+                               sv0 - border_v, sv1 + border_v, w, h, rgb, alpha);
             }
+
+            bool masked = (out.flags & format::studio_nf_masked) && !alpha.empty();
+            if (!masked)
+                out.flags &= ~format::studio_nf_masked;
+
+            if (shared != nullptr)
+                format::quantize_rgb_fixed(rgb.data(), masked ? alpha.data() : nullptr,
+                                           128, w, h, *shared, out.image);
+            else if (masked)
+                format::quantize_rgb_masked(rgb.data(), alpha.data(), 128, w, h,
+                                            out.image);
+            else
+                format::quantize_rgb(rgb.data(), w, h, out.image);
+        }
+
+        // build shared palettes from emitted tiles only.
+        bool build_tile_palette(const material_source &source,
+                                const std::vector<format::skin_chunk> &chunks,
+                                int material, unsigned max_skin, unsigned border,
+                                std::array<std::array<byte, 3>, 256> &out)
+        {
+            std::vector<byte> pooled, pooled_alpha;
+            std::vector<byte> rgb, alpha;
+            for (const format::skin_chunk &chunk : chunks)
+            {
+                if (chunk.source_material != material
+                    || (chunk.count_u <= 1 && chunk.count_v <= 1))
+                    continue;
+                unsigned width = chunk.count_u > 1
+                    ? max_skin : fit_dim(source.width, max_skin);
+                unsigned height = chunk.count_v > 1
+                    ? max_skin : fit_dim(source.height, max_skin);
+                double su0 = chunk.count_u > 1
+                    ? (double)chunk.origin_u * source.width : 0.0;
+                double sv0 = chunk.count_v > 1
+                    ? (double)chunk.origin_v * source.height : 0.0;
+                double su1 = chunk.count_u > 1
+                    ? su0 + (double)chunk.core_u * source.width : source.width;
+                double sv1 = chunk.count_v > 1
+                    ? sv0 + (double)chunk.core_v * source.height : source.height;
+                double border_u = chunk.count_u > 1 ? border : 0;
+                double border_v = chunk.count_v > 1 ? border : 0;
+                extract_region(source, su0 - border_u, su1 + border_u,
+                               sv0 - border_v, sv1 + border_v, width, height,
+                               rgb, alpha);
+                // every 4th pixel is plenty to characterise the colour range and
+                // keeps the histogram cheap on a model with dozens of tiles
+                for (std::size_t i = 0; i < (std::size_t)width * height; i += 4)
+                {
+                    pooled.push_back(rgb[i * 3]);
+                    pooled.push_back(rgb[i * 3 + 1]);
+                    pooled.push_back(rgb[i * 3 + 2]);
+                    if (!alpha.empty())
+                        pooled_alpha.push_back(alpha[i]);
+                }
+            }
+            if (pooled.empty())
+                return false;
+
+            unsigned count = (unsigned)(pooled.size() / 3);
+            format::indexed_image sample;
+            bool masked = (source.flags & format::studio_nf_masked)
+                && pooled_alpha.size() == count;
+            bool built = masked
+                ? format::quantize_rgb_masked(pooled.data(), pooled_alpha.data(), 128,
+                                              count, 1, sample)
+                : format::quantize_rgb(pooled.data(), count, 1, sample);
+            if (!built)
+                return false;
+            out = sample.palette;
             return true;
         }
 
@@ -199,7 +419,8 @@ namespace decompile
                             const std::vector<byte> &mdl,
                             const std::vector<byte> &vvd,
                             const std::vector<byte> &vtx,
-                            source_model_conversion &out,
+                            unsigned max_skin, int chunk_level, bool shared_palette,
+                            float area_keep, source_model_conversion &out,
                             std::string *error)
         {
             out = source_model_conversion{};
@@ -208,22 +429,75 @@ namespace decompile
             if (!format::load_source_model(mdl, vvd, vtx, model, error))
                 return false;
 
+            // decode every material once, at the best resolution the requested
+            // chunk level can actually use
+            unsigned decode_cap = max_skin;
+            for (int level = 1; level < chunk_level; level *= 2)
+                decode_cap *= 2;
+            if (decode_cap > 4096)
+                decode_cap = 4096;
+
+            std::vector<material_source> sources(model.materials.size());
+            for (std::size_t i = 0; i < model.materials.size(); i++)
+                load_material_source(content, model, model.materials[i], decode_cap,
+                                     sources[i]);
+
+            std::vector<format::tile_layout> layouts(model.materials.size());
+            for (std::size_t i = 0; i < sources.size(); i++)
+                layouts[i] = layout_for(sources[i], max_skin, chunk_level);
+
+            // cut the geometry along the tile grid before any texture is built,
+            // since that is what decides which tiles exist at all
+            std::vector<format::skin_chunk> chunks;
+            format::chunk_model_skins(model, layouts, area_keep, chunks);
             out.vertices = model.vertices.size();
             out.triangles = model.triangle_count();
-            for (const std::string &material : model.materials)
+
+            // one palette per tiled material, built from the tiles this model
+            // actually uses, so neighbouring tiles agree on colour
+            std::vector<std::array<std::array<byte, 3>, 256>> palettes(sources.size());
+            std::vector<bool> has_palette(sources.size(), false);
+            for (std::size_t i = 0; i < sources.size(); i++)
+                if (shared_palette && sources[i].ok
+                    && (layouts[i].count_u > 1 || layouts[i].count_v > 1))
+                    has_palette[i] = build_tile_palette(sources[i], chunks, (int)i,
+                                                        max_skin, tile_border,
+                                                        palettes[i]);
+
+            for (std::size_t i = 0; i < chunks.size(); i++)
             {
+                const format::skin_chunk &chunk = chunks[i];
+                std::size_t material = (std::size_t)chunk.source_material;
+                const material_source &source = sources[material];
+                std::string name = i < model.materials.size()
+                    ? model.materials[i] : std::string("skin");
                 format::studio_texture texture;
-                if (!resolve_skin(content, model, material, texture))
+                if (source.ok)
+                {
+                    const std::array<std::array<byte, 3>, 256> *shared =
+                        ((chunk.count_u > 1 || chunk.count_v > 1)
+                         && has_palette[material])
+                            ? &palettes[material] : nullptr;
+                    build_chunk_texture(source, chunk, name, max_skin, tile_border,
+                                        shared, texture);
+                    if (chunk.count_u > 1 || chunk.count_v > 1)
+                        out.chunked_skins++;
+                }
+                else
                 {
                     // a flat placeholder keeps the model loadable and makes the
                     // missing material obvious rather than silently black
-                    texture.name = to_lower(material) + ".bmp";
+                    texture.name = to_lower(name) + ".bmp";
                     texture.image.width = 16;
                     texture.image.height = 16;
                     texture.image.pixels.assign(16 * 16, 0);
                     texture.image.palette[0] = {255, 0, 220};
                     out.missing_skins++;
                 }
+                if (texture.flags & format::studio_nf_fullbright)
+                    out.fullbright_skins++;
+                if (texture.flags & format::studio_nf_additive)
+                    out.additive_skins++;
                 model.textures.push_back(std::move(texture));
             }
             out.textures = model.textures.size();
@@ -232,6 +506,8 @@ namespace decompile
 
         // "models/props/tree.mdl" -> the three files that make up the model
         bool convert_one(const content_source &content, const std::string &reference,
+                         unsigned max_skin, int chunk_level, bool shared_palette,
+                         float area_keep,
                          source_model_conversion &out)
         {
             std::string base = normalize(reference);
@@ -248,7 +524,9 @@ namespace decompile
                 && !content.load(base + ".vtx", vtx))
                 return false;
 
-            return convert_loaded(content, mdl, vvd, vtx, out, nullptr);
+            return convert_loaded(content, mdl, vvd, vtx, max_skin, chunk_level,
+                                  shared_palette, area_keep, out,
+                                  nullptr);
         }
 
         // every "model" key that names a studio model, from the entity block
@@ -325,6 +603,8 @@ namespace decompile
                     reader.i32_at(record + 32, skin);
                     prop.skin = skin;
                 }
+                if (stride >= 31)
+                    prop.solid = data[record + 30];
                 if (type < names.size())
                     prop.model = names[type];
                 props.push_back(prop);
@@ -334,6 +614,7 @@ namespace decompile
 
     bool convert_source_model(const std::string &source_mdl,
                               const std::vector<std::string> &game_dirs,
+                              unsigned max_skin_size,
                               source_model_conversion &out,
                               std::string *error)
     {
@@ -377,13 +658,21 @@ namespace decompile
         content_source content;
         content.game_dirs = game_dirs;
         open_vpks(content);
-        return convert_loaded(content, mdl, vvd, vtx, out, error);
+        return convert_loaded(content, mdl, vvd, vtx, clamp_skin_dim(max_skin_size),
+                              1, false, 1.0f, out, error);
     }
 
     void convert_source_models(const format::source_map_data &map,
-                               const std::vector<std::string> &game_dirs, model_result &out)
+                               const std::vector<std::string> &game_dirs,
+                               unsigned max_skin_size, int chunk_level,
+                               bool shared_tile_palette, float tile_area_keep,
+                               bool load_physics,
+                               model_result &out)
     {
         out = model_result{};
+        unsigned max_skin = clamp_skin_dim(max_skin_size);
+        if (chunk_level < 1)
+            chunk_level = 1;
 
         content_source content;
         content.pak.open(map.pakfile);
@@ -393,15 +682,38 @@ namespace decompile
         std::vector<std::string> prop_names;
         read_static_props(map, prop_names, out.props);
 
-        std::set<std::string> wanted(prop_names.begin(), prop_names.end());
+        std::set<std::string> wanted;
+        for (const prop_placement &prop : out.props)
+            if (!prop.model.empty())
+                wanted.insert(prop.model);
         collect_entity_models(map, wanted);
 
+        // rebuilding a model decodes and requantises every texture it uses and
+        // can take seconds per texture on a map with dozens of them, so this phase
+        // needs a bar like every other long one
+        progress::section("models");
+        progress::begin("converting models", (int)wanted.size());
         for (const std::string &reference : wanted)
         {
+            progress::add(1);
             if (reference.empty())
                 continue;
+
+            if (load_physics)
+            {
+                std::vector<byte> phy_data;
+                std::string phy_path = fs::strip_extension(reference) + ".phy";
+                if (content.load(phy_path, phy_data))
+                {
+                    converted_collision collision;
+                    collision.model = reference;
+                    if (format::load_source_phy(phy_data, collision.physics))
+                        out.collisions.push_back(std::move(collision));
+                }
+            }
             source_model_conversion conversion;
-            if (!convert_one(content, reference, conversion))
+            if (!convert_one(content, reference, max_skin, chunk_level,
+                             shared_tile_palette, tile_area_keep, conversion))
             {
                 out.failed++;
                 continue;
@@ -412,6 +724,11 @@ namespace decompile
             out.models.push_back(std::move(model));
             out.converted++;
             out.missing_skins += conversion.missing_skins;
+            out.fullbright_skins += conversion.fullbright_skins;
+            out.additive_skins += conversion.additive_skins;
+            out.chunked_skins += conversion.chunked_skins;
+            out.triangles += conversion.triangles;
         }
+        progress::end();
     }
 }

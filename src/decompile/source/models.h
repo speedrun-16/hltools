@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "format/phy/source/model.h"
 
 namespace format
 {
@@ -29,16 +30,31 @@ namespace decompile
         double origin[3] = {};
         double angles[3] = {};
         int skin = 0;
+        byte solid = 0;
+    };
+
+    struct converted_collision
+    {
+        std::string model;
+        format::source_phy_model physics;
     };
 
     struct model_result
     {
         std::vector<converted_model> models;
+        std::vector<converted_collision> collisions;
         std::vector<prop_placement> props;
         std::size_t converted = 0;      // models successfully rebuilt
         std::size_t failed = 0;         // models that could not be read or written
         std::size_t missing_skins = 0;  // materials with no resolvable image
         std::size_t split_models = 0;   // models that needed extra bodyparts
+        // skins whose source material was UnlitGeneric, so the goldsrc skin is
+        // flagged fullbright rather than lit from the entity origin
+        std::size_t fullbright_skins = 0;
+        std::size_t additive_skins = 0; // $additive materials, blended additively
+        // skins that are one tile of a larger source texture (see chunk level)
+        std::size_t chunked_skins = 0;
+        std::size_t triangles = 0;
     };
 
     // result of converting one loose Source studio model. Source models are a
@@ -52,10 +68,15 @@ namespace decompile
         std::size_t triangles = 0;
         std::size_t textures = 0;
         std::size_t missing_skins = 0;
+        std::size_t fullbright_skins = 0;
+        std::size_t additive_skins = 0;
+        std::size_t chunked_skins = 0;
     };
 
+    // max_skin_size is clamped to a multiple of 16 in 16..512.
     bool convert_source_model(const std::string &source_mdl,
                               const std::vector<std::string> &game_dirs,
+                              unsigned max_skin_size,
                               source_model_conversion &out,
                               std::string *error = nullptr);
 
@@ -67,5 +88,16 @@ namespace decompile
     // ending in .mdl. failures are counted rather than fatal, so one broken
     // model never costs the rest of the port.
     void convert_source_models(const format::source_map_data &map,
-                               const std::vector<std::string> &game_dirs, model_result &out);
+                               const std::vector<std::string> &game_dirs,
+                               unsigned max_skin_size, int chunk_level,
+                               bool shared_tile_palette, float tile_area_keep,
+                               bool load_physics,
+                               model_result &out);
+
+    inline void convert_source_models(const format::source_map_data &map,
+                                      const std::vector<std::string> &game_dirs,
+                                      model_result &out)
+    {
+        convert_source_models(map, game_dirs, 512, 1, false, 1.0f, false, out);
+    }
 }
