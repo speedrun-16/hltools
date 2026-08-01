@@ -212,6 +212,12 @@ target_link_libraries(hltools_compile_parameters
 # decompile: read only bsp tree reconstruction and valve 220 map writing
 add_library(hltools_decompile STATIC
     src/decompile/map_decompiler.cpp
+)
+target_include_directories(hltools_decompile PUBLIC src)
+target_link_libraries(hltools_decompile PUBLIC hltools_format hltools_math hltools_common)
+
+# Source BSP to GoldSrc MAP, WAD, model, and sky conversion
+add_library(hltools_port STATIC
     src/decompile/source/displacements.cpp
     src/decompile/source/entities.cpp
     src/decompile/source/map.cpp
@@ -219,8 +225,8 @@ add_library(hltools_decompile STATIC
     src/decompile/source/models.cpp
     src/decompile/source/skybox.cpp
 )
-target_include_directories(hltools_decompile PUBLIC src)
-target_link_libraries(hltools_decompile PUBLIC hltools_format hltools_math hltools_common)
+target_include_directories(hltools_port PUBLIC src)
+target_link_libraries(hltools_port PUBLIC hltools_format hltools_math hltools_common)
 
 # model asset generators and converters
 add_library(hltools_model STATIC
@@ -403,6 +409,7 @@ add_executable(hltools
     src/cli/hltools/compile.cpp
     src/cli/tools/csg_tool.cpp
     src/cli/tools/bsp_tool.cpp
+    src/cli/tools/bsp_port_tool.cpp
     src/cli/tools/vis_tool.cpp
     src/cli/tools/rad_tool.cpp
     src/cli/tools/bsp_info_tool.cpp
@@ -412,7 +419,7 @@ add_executable(hltools
     src/cli/tools/model_tool.cpp
 )
 target_link_libraries(hltools PRIVATE hltools_csg hltools_bsp hltools_vis hltools_rad
-    hltools_decompile hltools_model hltools_compile_parameters)
+    hltools_decompile hltools_port hltools_model hltools_compile_parameters)
 add_hltools_windows_version(hltools "${PROJECT_DESCRIPTION}")
 set_target_properties(hltools PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 

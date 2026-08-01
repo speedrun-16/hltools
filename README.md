@@ -22,9 +22,10 @@ Under development. Bugs, incomplete behavior and output differences may still oc
 | `hltools rad` | Complete | CPU radiosity lighting plus optional approximate Vulkan GPU gathering |
 | `hltools bsp info` | Complete | Inspect BSP stages, entities, textures, WAD references and engine limits |
 | `hltools bsp pack` | Available | Package a BSP and referenced assets as a game-directory tree or ZIP with a `.res` file |
+| `hltools bsp port` | Available | Port Source BSPs to GoldSrc MAP, WAD, model, and sky output |
 | `hltools wad` | Complete | List, extract and build WAD3 texture archives; accepts WAD or BSP input |
 | `hltools lightmap` | Complete | Export all face lightmaps and styles to a deterministic 24-bit BMP atlas |
-| `hltools decompile` | Complete | Decompile GoldSrc BSPs or port Source BSPs to GoldSrc MAP, WAD, and asset output |
+| `hltools decompile` | Complete | Restore or reconstruct GoldSrc BSPs as Valve 220 MAP files |
 | `hltools ripent` | Planned | Import and export entity and texture lumps |
 | `hltools model` | Available | Convert Source studio models and build full-resolution GoldSrc skybox models |
 
@@ -235,7 +236,7 @@ When porting a Source BSP, export native-sized faces first. `-skysize` supports
 power-of-two sizes through 4096 for this workflow:
 
 ```powershell
-hltools decompile source.bsp staging/map.map -game path/to/game -skysize 1024
+hltools bsp port source.bsp staging/map.map -game path/to/game -skysize 1024
 hltools model skybox staging/gfx/env/night staging/models/night_sky
 ```
 
@@ -563,20 +564,13 @@ uint64_t zip_offset;   // absolute file offset; ZIP continues to EOF
 
 Vanilla GoldSrc reads the standard lumps and ignores the trailing extension.
 
-#### Source BSP porting
+### `bsp port`
 
-Source-engine BSPs are detected from their `VBSP` header and use a separate
-porting path:
+Source BSP porting is independent from GoldSrc decompilation:
 
 ```powershell
-hltools decompile source.bsp staging/map.map -game path/to/game -game path/to/hl2 -toolwad sdhlt.wad
+hltools bsp port source.bsp staging/map.map -game path/to/game -game path/to/hl2 -toolwad sdhlt.wad
 ```
-
-> [!NOTE]
-> Source BSP porting currently uses `hltools decompile`. It is planned to move
-> to `hltools bsp port`, leaving `decompile` focused on embedded restoration and
-> structural decompilation of GoldSrc BSPs. The current invocation will remain
-> available as a compatibility alias during the transition.
 
 Source BSPs retain their original brushes and brushsides, so hltools ports those
 records directly instead of reconstructing solids from the BSP tree. It remaps
@@ -788,7 +782,8 @@ The console shows changed settings, compact loading statistics, live phase progr
 | `rad -gpu` | Deterministic approximate acceleration; small differences from floating point calculations are expected |
 | `bsp info`, `wad list`, `lightmap` | Do not modify their input BSP or WAD |
 | `wad extract/build` | Preserves indexed pixels, four mip levels and the 256-color palette |
-| `decompile` | Restores an embedded GoldSrc MAP, reconstructs GoldSrc BSP geometry, or ports a Source VBSP to GoldSrc MAP, WAD, and assets |
+| `decompile` | Restores an embedded GoldSrc MAP or reconstructs GoldSrc BSP geometry |
+| `bsp port` | Converts Source BSP content to GoldSrc MAP, WAD, models, and sky assets |
 
 For strict reference comparisons, use CPU RAD and a fixed thread count, normally `-threads 1`.
 
@@ -825,7 +820,6 @@ reproduces the less conservative centroid selection, while
 - Implement `hltools ripent` for importing and exporting entity lumps and embedded textures.
 - Implement GoldSrc QC/SMD compilation and decompilation under `hltools model`; `model convert` writes binary `.mdl` directly and has no QC/SMD path.
 - Implement studio model shadows requested by `env_static` and `zhlt_studioshadow`.
-- Move Source BSP conversion to `hltools bsp port`, retaining the current `decompile` route as a compatibility alias during the transition.
 - Implement VIS `-maxdistance`; it is recognized today but fails explicitly.
 - Parallelize useful BSP work; `-threads` configures the shared pool, but most BSP processing is still serial.
 - Continue expanding compiler fixtures, complete pipeline maps, regression cases and automated test coverage.
@@ -843,7 +837,7 @@ flowchart TD
     CLI --> BSP["bsp"]
     CLI --> VIS["vis"]
     CLI --> RAD["rad"]
-    CLI --> UTIL["bsp info / bsp pack / wad / lightmap / decompile"]
+    CLI --> UTIL["bsp info / bsp pack / bsp port / wad / lightmap / decompile"]
     RAD --> GPU["optional Vulkan compute backend"]
     CSG --> FORMAT["format<br/>BSP, WAD, entities, images"]
     BSP --> FORMAT

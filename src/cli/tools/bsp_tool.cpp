@@ -15,6 +15,7 @@
 #include "format/bsp/file.h"
 #include "format/bsp/usage_chart.h"
 #include "bsp_info_tool.h"
+#include "bsp_port_tool.h"
 #include "compile_parameters.h"
 
 namespace stdfs = std::filesystem;
@@ -49,6 +50,7 @@ namespace tools
                 "  hltools bsp [options] <map>\n"
                 "  hltools bsp info <map[.bsp]>\n"
                 "  hltools bsp pack <map.bsp> <output-dir|output.zip> [options]\n"
+                "  hltools bsp port <source.bsp> <output.map> [options]\n"
                 "\n"
                 "  builds the bsp trees for all four hulls from csg's plane lists,\n"
                 "  fills the outside, fixes t-junctions, and writes the portal file.\n"
@@ -259,6 +261,8 @@ namespace tools
             return run_bsp_info_tool(argc - 1, argv + 1);
         if (argc >= 2 && str::iequals(argv[1], "pack"))
             return run_pack(argc, argv);
+        if (argc >= 2 && str::iequals(argv[1], "port"))
+            return run_bsp_port_tool(argc - 1, argv + 1);
 
         cli::args command_line(argc, argv);
         const bool want_help = command_line.has("-h")

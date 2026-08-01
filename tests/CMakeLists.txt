@@ -84,16 +84,16 @@ add_hltools_unit(unit_format
     LIBRARIES hltools_format
     LABEL unit.format)
 
-add_hltools_unit(unit_decompile
-    PREFIX "unit.decompile."
+add_hltools_unit(unit_port
+    PREFIX "unit.port."
     SOURCES
         unit/decompile/source/displacements.cpp
         unit/decompile/source/entities.cpp
         unit/decompile/source/materials.cpp
         unit/decompile/source/models.cpp
         unit/decompile/source/skybox.cpp
-    LIBRARIES hltools_decompile
-    LABEL unit.decompile)
+    LIBRARIES hltools_port
+    LABEL unit.port)
 
 add_hltools_unit(unit_model
     PREFIX "unit.model."
@@ -216,6 +216,11 @@ add_hltools_check(decompile_check
     LIBRARIES hltools_decompile hltools_csg
     ARGS "${HLTOOLS_TEST_SCRATCH_DIRECTORY}/decompile"
     LABELS integration tools decompile)
+
+add_test(NAME integration.tools.bsp_port_help
+    COMMAND $<TARGET_FILE:hltools> bsp port -h)
+set_tests_properties(integration.tools.bsp_port_help PROPERTIES
+    LABELS "integration;tools;port")
 
 # these checks need the feature rich compiled bsp fixture they remain build
 # targets until that fixture is generated as part of ctest rather than by hand
