@@ -1,6 +1,6 @@
 # hltools
 
-hltools is a modern rewrite of the [SDHLT](https://github.com/seedee/SDHLT/) tools, focused on faster compilation, clearer diagnostics, new map and asset utilities.
+hltools is a modern goldsrc map and asset toolchain. It is a rewrite of the [SDHLT](https://github.com/seedee/SDHLT/) tools, focused on faster compilation, clearer diagnostics, and new map and asset utilities.
 
 The toolchain preserves established compiler behavior and map compatibility while using a cleaner architecture, reusable libraries and a unified command line interface. `hltools compile` is the primary compilation workflow.
 

@@ -99,7 +99,7 @@ namespace tools
 
         char b1[32];
         logging::console("\nbsp info: %s\n\n", bsp_path.c_str());
-        logging::console("  %-14s 30 (goldsrc)\n", "version");
+        logging::console("  %-14s 30 (GoldSrc)\n", "version");
         logging::console("  %-14s %s\n", "file size",
                          str::human_bytes(fs::size(bsp_path), b1, sizeof(b1)));
         logging::console("  %-14s csg+bsp%s%s%s\n", "stages",

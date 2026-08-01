@@ -50,7 +50,7 @@ namespace logging
     void init_console();
 
     // stage banner and the closing "done " line scope is the stage name
-    // ("rad") or "goldsrc toolkit" for the hltools front page:
+    // ("rad") or "goldsrc map and asset toolchain" for the hltools front page:
     //   hltools 100 - rad  (11 july 2026, 9e94bb0)
     void banner(const char *scope);
     void done(double elapsed_seconds);

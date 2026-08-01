@@ -14,15 +14,15 @@
 #include "../tools/model_tool.h"
 #include "compile.h"
 
-// hltools: single binary goldsrc toolkit dispatches to subcommands
+// hltools: single-binary goldsrc map and asset toolchain
 
 namespace
 {
     void print_help()
     {
-        logging::banner("goldsrc toolkit");
+        logging::banner("goldsrc map and asset toolchain");
         logging::console(
-            "  tools for working with goldsrc maps, models, and assets.\n"
+            "  tools for working with GoldSrc maps, models, and assets.\n"
             "\n"
             "usage\n"
             "  hltools <command> [options] <target>\n"

@@ -1,11 +1,11 @@
 #================================
-# hltools - compiler toolchain
+# hltools - goldsrc map and asset toolchain
 #================================
 
 cmake_minimum_required(VERSION 3.21)
 
 project(hltools
-    DESCRIPTION "halflife map compiler toolchain"
+    DESCRIPTION "goldsrc map and asset toolchain"
     LANGUAGES CXX
 )
 
