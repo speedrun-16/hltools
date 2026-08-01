@@ -27,6 +27,10 @@ namespace decompile
         // equivalent derived from the texture's average opacity
         bool translucent = false;
         int render_amount = 255;
+        // $additive material: the texture is blended onto what is behind it
+        // rather than covering it. goldsrc spells this rendermode 5 on the
+        // owning entity, so an additive world brush has to become one.
+        bool additive = false;
         // the material's alpha channel carried a cutout shape, so the goldsrc
         // texture is '{' masked. the owning brush must become an entity with
         // rendermode 4 (solid) and renderamt 255 for the engine to honour it

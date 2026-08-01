@@ -10,6 +10,7 @@
 #include "common/filesystem.h"
 #include "format/bmp/image.h"
 #include "format/image/quantize.h"
+#include "format/image/resample.h"
 #include "format/vbsp/data.h"
 #include "format/vbsp/pakfile.h"
 #include "format/vmt/vmt.h"
@@ -206,42 +207,6 @@ namespace decompile
             return d - (d % goldsrc_min_dim);
         }
 
-        std::vector<byte> resample_nearest(const std::vector<byte> &src, unsigned sw,
-                                           unsigned sh, unsigned dw, unsigned dh)
-        {
-            std::vector<byte> out((std::size_t)dw * dh * 3);
-            for (unsigned y = 0; y < dh; y++)
-            {
-                unsigned sy = sh ? (y * sh) / dh : 0;
-                for (unsigned x = 0; x < dw; x++)
-                {
-                    unsigned sx = sw ? (x * sw) / dw : 0;
-                    std::size_t s = ((std::size_t)sy * sw + sx) * 3;
-                    std::size_t o = ((std::size_t)y * dw + x) * 3;
-                    out[o] = src[s];
-                    out[o + 1] = src[s + 1];
-                    out[o + 2] = src[s + 2];
-                }
-            }
-            return out;
-        }
-
-        std::vector<byte> resample_alpha_nearest(const std::vector<byte> &src, unsigned sw,
-                                                 unsigned sh, unsigned dw, unsigned dh)
-        {
-            std::vector<byte> out((std::size_t)dw * dh);
-            for (unsigned y = 0; y < dh; y++)
-            {
-                unsigned sy = sh ? (y * sh) / dh : 0;
-                for (unsigned x = 0; x < dw; x++)
-                {
-                    unsigned sx = sw ? (x * sw) / dw : 0;
-                    out[(std::size_t)y * dw + x] = src[(std::size_t)sy * sw + sx];
-                }
-            }
-            return out;
-        }
-
         // opacity below which a masked texel is punched out
         constexpr byte mask_threshold = 128;
 
@@ -345,6 +310,7 @@ namespace decompile
             // looked up in the patch first, then the included base material.
             std::vector<byte> vmt_bytes;
             std::string basetexture, translucent_value, alpha_value, alphatest_value;
+            std::string additive_value;
             bool water = false;
             std::string material_reference =
                 normalize_material_reference(material);
@@ -377,6 +343,7 @@ namespace decompile
                     translucent_value = lookup("$translucent");
                     alpha_value = lookup("$alpha");
                     alphatest_value = lookup("$alphatest");
+                    additive_value = lookup("$additive");
 
                     // the Water shader has no $basetexture (it renders from a
                     // runtime reflection/refraction pass); its editor preview
@@ -409,11 +376,15 @@ namespace decompile
                 unsigned gw = fit_dim(image.width, material_max_size);
                 unsigned gh = fit_dim(image.height, material_max_size);
                 bool rescaled = gw != image.width || gh != image.height;
+                // source art is routinely 2048 or 4096 on a side and lands on 512
+                // or below, so the reduction filter matters: point sampling an 8x
+                // reduction keeps one source pixel in 64 and aliases badly
                 std::vector<byte> rgb = rescaled
-                    ? resample_nearest(image.rgb, image.width, image.height, gw, gh)
+                    ? format::resample_rgb(image.rgb, image.width, image.height, gw, gh,
+                                           image.alpha.empty() ? nullptr : &image.alpha)
                     : image.rgb;
                 std::vector<byte> alpha = (rescaled && !image.alpha.empty())
-                    ? resample_alpha_nearest(image.alpha, image.width, image.height, gw, gh)
+                    ? format::resample_alpha(image.alpha, image.width, image.height, gw, gh)
                     : image.alpha;
 
                 // $alpha scales the whole material uniformly, so a value of zero
@@ -463,6 +434,15 @@ namespace decompile
                         rm.masked = true;
                         rm.render_amount = 255;
                         masked_++;
+                    }
+                    else if (additive_value == "1")
+                    {
+                        // additive blending ignores the alpha channel entirely:
+                        // the texture is added to what is behind it, so black
+                        // reads as transparent. goldsrc's rendermode 5 does the
+                        // same and takes renderamt as an overall brightness.
+                        rm.additive = true;
+                        rm.render_amount = 255;
                     }
                     else
                     {

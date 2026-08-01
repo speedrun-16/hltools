@@ -63,6 +63,16 @@ namespace
             "}\n";
         require(fs::write_all(path.string(), text.data(), text.size()));
     }
+
+    void write_additive_material(const std::filesystem::path &path)
+    {
+        std::string text =
+            "\"UnlitGeneric\"\n{\n"
+            "\t\"$basetexture\" \"custom/additive\"\n"
+            "\t\"$additive\" \"1\"\n"
+            "}\n";
+        require(fs::write_all(path.string(), text.data(), text.size()));
+    }
 }
 
 suite("unit.decompile.source_materials")
@@ -138,5 +148,28 @@ suite("unit.decompile.source_materials")
         require(catalog.textures().size() == 1);
         expect(catalog.textures()[0].width == 32);
         expect(catalog.textures()[0].height == 32);
+    }
+
+    test("material_catalog preserves additive blending")
+    {
+        std::filesystem::path game =
+            test_support::scratch_directory("source_materials_additive");
+        std::filesystem::path materials = game / "materials" / "custom";
+        require(fs::make_directory(materials.string()));
+        write_additive_material(materials / "additive.vmt");
+        std::vector<byte> vtf = make_rgb_vtf(16);
+        require(fs::write_all((materials / "additive.vtf").string(),
+                              vtf.data(), vtf.size()));
+
+        format::source_map_data map;
+        map.material_names = {"custom/additive"};
+        decompile::material_catalog catalog;
+        catalog.build(map, {game.string()});
+
+        const decompile::resolved_material &material =
+            catalog.resolve("custom/additive");
+        expect(material.additive);
+        expect(material.render_amount == 255);
+        expect_false(material.translucent);
     }
 }
