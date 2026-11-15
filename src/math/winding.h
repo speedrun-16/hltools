@@ -470,10 +470,10 @@ namespace math
             const T epsilon = (T)on_epsilon;
             for (int i = 0; i < (int)points_.size(); i++)
             {
-                int n = (int)points_.size();
-                const vec3<T> &p1 = points_[(i + n - 1) % n];
+                const int n = (int)points_.size();
+                const vec3<T> &p1 = points_[i == 0 ? n - 1 : i - 1];
                 const vec3<T> &p2 = points_[i];
-                const vec3<T> &p3 = points_[(i + 1) % n];
+                const vec3<T> &p3 = points_[i + 1 == n ? 0 : i + 1];
                 vec3<T> v1 = p2 - p1;
                 vec3<T> v2 = p3 - p2;
                 T d12 = dot(v1, v2);
@@ -482,7 +482,12 @@ namespace math
                 if (d12 * d12 >= d11 * d22 - epsilon * epsilon * (d11 + d22 + epsilon * epsilon))
                 {
                     points_.erase(points_.begin() + i);
-                    i = -1; // restart the scan, matching the reference
+                    // the reference restarts the scan from 0 after every erase;
+                    // only the triples around i changed, and every point before
+                    // i - 1 already passed with its neighbours untouched, so
+                    // resuming at i - 1 finds the same next point (unless the
+                    // erase wrapped and changed point 0's neighbour)
+                    i = (i == 0 || i == n - 1) ? -1 : i - 2;
                 }
             }
         }
