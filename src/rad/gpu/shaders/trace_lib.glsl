@@ -64,12 +64,13 @@ int traceLine(float segSX, float segSY, float segSZ,
     float stackSX[TRACE_STACK_SIZE];
     float stackSY[TRACE_STACK_SIZE];
     float stackSZ[TRACE_STACK_SIZE];
-    float stackEX[TRACE_STACK_SIZE];
-    float stackEY[TRACE_STACK_SIZE];
-    float stackEZ[TRACE_STACK_SIZE];
+    // A segment end is either the original ray end or an earlier split
+    // midpoint that is still the start of a pending far segment below it.
+    int stackEnd[TRACE_STACK_SIZE];
     int top = 0;
 
     int node = 0;
+    int stopIndex = -1;
     precise float curStartX = segSX;
     precise float curStartY = segSY;
     precise float curStartZ = segSZ;
@@ -135,9 +136,7 @@ int traceLine(float segSX, float segSY, float segSZ,
                 stackSX[top] = curStartX;
                 stackSY[top] = curStartY;
                 stackSZ[top] = curStartZ;
-                stackEX[top] = curStopX;
-                stackEY[top] = curStopY;
-                stackEZ[top] = curStopZ;
+                stackEnd[top] = stopIndex;
                 top++;
                 node = tn.child0;
                 continue;
@@ -162,9 +161,8 @@ int traceLine(float segSX, float segSY, float segSZ,
                 stackSX[top] = midX;
                 stackSY[top] = midY;
                 stackSZ[top] = midZ;
-                stackEX[top] = curStopX;
-                stackEY[top] = curStopY;
-                stackEZ[top] = curStopZ;
+                stackEnd[top] = stopIndex;
+                stopIndex = top;
                 top++;
                 node = nearChild;
                 curStopX = midX;
@@ -233,9 +231,19 @@ int traceLine(float segSX, float segSY, float segSZ,
         curStartX = stackSX[top];
         curStartY = stackSY[top];
         curStartZ = stackSZ[top];
-        curStopX = stackEX[top];
-        curStopY = stackEY[top];
-        curStopZ = stackEZ[top];
+        stopIndex = stackEnd[top];
+        if (stopIndex < 0)
+        {
+            curStopX = segEX;
+            curStopY = segEY;
+            curStopZ = segEZ;
+        }
+        else
+        {
+            curStopX = stackSX[stopIndex];
+            curStopY = stackSY[stopIndex];
+            curStopZ = stackSZ[stopIndex];
+        }
     }
 
     return result;
