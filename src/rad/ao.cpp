@@ -68,8 +68,10 @@ namespace rad
     // -extra puts a 3x3 cache grid behind every luxel, and each of those nine
     // samples draws its own decorrelated ray set, so the luxel already averages
     // nine independent estimates. spending the full ray count on each of them
-    // buys a quality nobody asked for; the budget is divided instead so -extra
-    // costs about what a plain compile does and still comes out cleaner
+    // buys a quality nobody asked for, so the budget is divided by the grid's
+    // side. that is not by its area: the nine samples together still fire
+    // about three times the rays of a plain compile (9 x 22 against 64 at the
+    // default), which is what keeps -extra visibly cleaner
     int ao_rays_for_density(const rad_options &options, int lmcache_density)
     {
         int rays = options.ao_rays;
