@@ -1,7 +1,10 @@
+#include <bitset>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "../common/error.h"
 #include "../common/log.h"
@@ -655,6 +658,7 @@ namespace rad
                 return false;
             }
 
+            const auto setup_started = std::chrono::steady_clock::now();
             // per map scene: patch soa (+ per patch receiver cone info),
             // flattened windings, and every sky normal level
             gpu::formfactor_scene scene;
@@ -703,18 +707,33 @@ namespace rad
 
             progress::section("lighting");
             progress::begin("computing light transfers", (int)state.num_patches);
+            // per batch uploads still work if staging fails, so ignore it
+            gpu::formfactor_begin(scene);
+            struct ff_session_guard
+            {
+                ~ff_session_guard() { gpu::formfactor_end(); }
+            } ff_session;
 
             // enumerate visible pairs straight from the sparse columns
             // (o(visible), not the o(patches²) binary searches the cpu loop
             // does): column x holds partners y > x, so partners below i come
             // from a one shot transposed pass outer x ascends, keeping every
             // list in the ascending order the cpu loop walks
-            std::vector<std::vector<unsigned>> below(state.num_patches);
+            // the transposed lists are flat (count, prefix sum, fill): one
+            // allocation instead of a growing vector per patch
+            std::vector<size_t> below_first((size_t)state.num_patches + 1, 0);
             std::vector<unsigned> above_count(state.num_patches);
+            threads::run((int)state.num_patches, [&](int x)
+                         {
+                             const sparse_column &column = state.sparse_columns[(size_t)x];
+                             unsigned count = 0;
+                             for (int r = 0; r < column.count; r++)
+                                 count += (unsigned)std::bitset<8>(column.row[r].values & 0xffu).count();
+                             above_count[(size_t)x] = count;
+                         });
             for (unsigned x = 0; x < state.num_patches; x++)
             {
                 const sparse_column &column = state.sparse_columns[x];
-                unsigned count = 0;
                 for (int r = 0; r < column.count; r++)
                 {
                     const unsigned bits = column.row[r].values;
@@ -722,39 +741,74 @@ namespace rad
                     for (unsigned b = 0; b < 8; b++)
                     {
                         if (bits & (1u << b))
+                            below_first[ybase + b + 1]++;
+                    }
+                }
+            }
+            for (unsigned y = 0; y < state.num_patches; y++)
+                below_first[y + 1] += below_first[y];
+            // filled with x ascending, so every list keeps the ascending
+            // order the cpu loop walks
+            std::vector<unsigned> below_list(below_first[state.num_patches]);
+            {
+                std::vector<size_t> cursor(below_first.begin(), below_first.end() - 1);
+                for (unsigned x = 0; x < state.num_patches; x++)
+                {
+                    const sparse_column &column = state.sparse_columns[x];
+                    for (int r = 0; r < column.count; r++)
+                    {
+                        const unsigned bits = column.row[r].values;
+                        const unsigned ybase = column.row[r].offset * 8;
+                        for (unsigned b = 0; b < 8; b++)
                         {
-                            below[ybase + b].push_back(x);
-                            count++;
+                            if (bits & (1u << b))
+                                below_list[cursor[ybase + b]++] = x;
                         }
                     }
                 }
-                above_count[x] = count;
             }
 
+            const double setup_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - setup_started).count();
             constexpr unsigned chunk_patches = 4096;
-            std::vector<gpu::transfer_pair> pairs;
-            std::vector<size_t> first(chunk_patches + 1);
-            std::vector<float> trans;
-
-            for (unsigned base = 0; base < state.num_patches; base += chunk_patches)
+            // double buffered: while the gpu computes one chunk, the cpu
+            // filters the chunk before it and packs the chunk after it. every
+            // patch's transfers depend only on its own pairs, so the overlap
+            // leaves the results exactly as the serial loop made them
+            struct chunk_buffers
             {
-                const unsigned count = state.num_patches - base < chunk_patches
-                    ? state.num_patches - base : chunk_patches;
+                unsigned base = 0;
+                unsigned count = 0;
+                std::vector<gpu::transfer_pair> pairs;
+                std::vector<size_t> first = std::vector<size_t>(chunk_patches + 1);
+                std::vector<float> trans;
+            };
+            chunk_buffers buffers[2];
+            double pack_seconds = 0.0, gpu_seconds = 0.0, filter_seconds = 0.0;
+            auto now = [] { return std::chrono::steady_clock::now(); };
+            auto since = [](std::chrono::steady_clock::time_point t)
+            { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
 
+            // pass a (cpu, threaded): the chunk's pairs, receiver major
+            auto pack = [&](chunk_buffers &c, unsigned base)
+            {
+                const auto t0 = now();
+                c.base = base;
+                c.count = state.num_patches - base < chunk_patches ? state.num_patches - base : chunk_patches;
                 // Give each worker its receiver's slice of the dispatch
                 // buffer. Lower emitters precede the ascending sparse rows.
-                for (unsigned k = 0; k < count; k++)
+                for (unsigned k = 0; k < c.count; k++)
                 {
                     const unsigned i = base + k;
-                    first[k + 1] = first[k] + below[i].size() + above_count[i];
+                    c.first[k + 1] = c.first[k] + (below_first[i + 1] - below_first[i]) + above_count[i];
                 }
-                pairs.resize(first[count]);
-                threads::run((int)count, [&](int k)
+                c.pairs.resize(c.first[c.count]);
+                threads::run((int)c.count, [&](int k)
                              {
                                  const unsigned i = base + (unsigned)k;
-                                 size_t next = first[(size_t)k];
-                                 for (unsigned j : below[i])
-                                     pairs[next++] = {(int32_t)i, (int32_t)j};
+                                 size_t next = c.first[(size_t)k];
+                                 for (size_t b = below_first[i]; b < below_first[i + 1]; b++)
+                                     c.pairs[next++] = {(int32_t)i, (int32_t)below_list[b]};
 
                                  const sparse_column &column = state.sparse_columns[i];
                                  for (int r = 0; r < column.count; r++)
@@ -764,25 +818,21 @@ namespace rad
                                      for (unsigned b = 0; b < 8; b++)
                                      {
                                          if (bits & (1u << b))
-                                             pairs[next++] = {(int32_t)i, (int32_t)(ybase + b)};
+                                             c.pairs[next++] = {(int32_t)i, (int32_t)(ybase + b)};
                                      }
                                  }
                              });
+                pack_seconds += since(t0);
+            };
 
-                // pass b (gpu): one transfer factor per pair
-                if (!pairs.empty() && !gpu::formfactor_batch(scene, pairs, trans))
-                {
-                    progress::end();
-                    logging::warn("-gpu: %s; computing light transfers on the cpu",
-                                  gpu::last_error().c_str());
-                    return false;
-                }
-
-                // pass c (cpu, threaded): filter and compress, mirroring the
-                // tail of make_scales_item
-                threads::run((int)count, [&](int k)
+            // pass c (cpu, threaded): filter and compress, mirroring the
+            // tail of make_scales_item
+            auto filter = [&](const chunk_buffers &c)
+            {
+                const auto t0 = now();
+                threads::run((int)c.count, [&](int k)
                              {
-                                 const unsigned i = base + (unsigned)k;
+                                 const unsigned i = c.base + (unsigned)k;
                                  patch *pt = &state.patches[(size_t)i];
                                  pt->i_index = 0;
                                  pt->i_data = 0;
@@ -801,10 +851,10 @@ namespace rad
                                  vec_t scale = state.lightingconeinfo[(size_t)miptex][1];
                                  bool diversify = (power != 1.0 || scale != 1.0);
 
-                                 for (size_t s = first[(size_t)k]; s < first[(size_t)k + 1]; s++)
+                                 for (size_t s = c.first[(size_t)k]; s < c.first[(size_t)k + 1]; s++)
                                  {
-                                     float t = trans[s];
-                                     unsigned j = (unsigned)pairs[s].emitter;
+                                     float t = c.trans[s];
+                                     unsigned j = (unsigned)c.pairs[s].emitter;
                                      if (std::isnan(t))
                                      {
                                          t = gpu_transfer_fallback(state, pt, &state.patches[(size_t)j],
@@ -850,9 +900,57 @@ namespace rad
                                  }
                                  progress::add(1);
                              });
+                filter_seconds += since(t0);
+            };
+
+            const unsigned num_chunks = (state.num_patches + chunk_patches - 1) / chunk_patches;
+            if (num_chunks)
+                pack(buffers[0], 0);
+            bool gpu_failed = false;
+            for (unsigned n = 0; n < num_chunks; n++)
+            {
+                chunk_buffers &current = buffers[n & 1];
+                chunk_buffers &other = buffers[(n + 1) & 1];
+
+                // pass b (gpu): one transfer factor per pair, on its own
+                // thread so the cpu passes below overlap it
+                bool ok = true;
+                double elapsed = 0.0;
+                std::thread dispatch([&]()
+                    {
+                        const auto t0 = now();
+                        if (!current.pairs.empty())
+                            ok = gpu::formfactor_batch(scene, current.pairs, current.trans);
+                        else
+                            current.trans.clear();
+                        elapsed = since(t0);
+                    });
+                // meanwhile: finish chunk n - 1, then reuse its buffer for n + 1
+                if (n > 0)
+                    filter(other);
+                if (n + 1 < num_chunks)
+                    pack(other, (n + 1) * chunk_patches);
+                dispatch.join();
+                gpu_seconds += elapsed;
+                if (!ok)
+                {
+                    gpu_failed = true;
+                    break;
+                }
+            }
+            if (!gpu_failed && num_chunks)
+                filter(buffers[(num_chunks - 1) & 1]);
+            if (gpu_failed)
+            {
+                progress::end();
+                logging::warn("-gpu: %s; computing light transfers on the cpu",
+                              gpu::last_error().c_str());
+                return false;
             }
 
             progress::end();
+            logging::file("      gpu transfers: pack %.2fs, gpu %.2fs, filter %.2fs (overlapped), setup %.2fs\n",
+                          pack_seconds, gpu_seconds, filter_seconds, setup_seconds);
             return true;
         }
     }
