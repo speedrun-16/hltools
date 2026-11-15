@@ -11,6 +11,11 @@
 #include "../math/vector.h"
 #include "vis.h"
 
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__SSE2__) \
+    || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define HLTOOLS_VIS_SSE2 1
+#endif
+
 namespace vis
 {
     constexpr int max_portals = 32768;
@@ -31,6 +36,24 @@ namespace vis
         bool original = false;
         int numpoints = 0;
         math::vec3v points[max_points_on_winding] = {};
+
+#if HLTOOLS_VIS_SSE2
+        alignas(16) float small_points[3][4] = {};
+#endif
+
+        void pack_small_points()
+        {
+#if HLTOOLS_VIS_SSE2
+            if (numpoints > 4)
+                return;
+            for (int i = 0; i < numpoints; i++)
+            {
+                small_points[0][i] = points[i].x;
+                small_points[1][i] = points[i].y;
+                small_points[2][i] = points[i].z;
+            }
+#endif
+        }
     };
 
     struct plane

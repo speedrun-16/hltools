@@ -285,6 +285,7 @@ namespace vis
                     for (int k = 0; k < 3; k++)
                         w->points[j][k] = (float)v[k];
                 }
+                w->pack_small_points();
 
                 plane portal_plane;
                 plane_from_winding(w, &portal_plane);
@@ -311,6 +312,7 @@ namespace vis
                 p->winding_->numpoints = w->numpoints;
                 for (int j = 0; j < w->numpoints; j++)
                     math::copy(w->points[w->numpoints - 1 - j], p->winding_->points[j]);
+                p->winding_->pack_small_points();
 
                 p->plane_ = portal_plane;
                 p->leaf = leafnums[0];

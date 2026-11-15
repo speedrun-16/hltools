@@ -11,9 +11,7 @@
 #include "../common/error.h"
 #include "../common/log.h"
 
-#if defined(_M_X64) || defined(_M_AMD64) || defined(__SSE2__) \
-    || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-#define HLTOOLS_VIS_SSE2 1
+#if HLTOOLS_VIS_SSE2
 #include <emmintrin.h>
 #endif
 
@@ -52,6 +50,14 @@ namespace vis
         }
 
 #if HLTOOLS_VIS_SSE2
+        inline __m128 plane_dists(__m128 x, __m128 y, __m128 z, const plane &pl)
+        {
+            __m128 d = _mm_add_ps(_mm_mul_ps(x, _mm_set1_ps(pl.normal.x)),
+                                  _mm_mul_ps(y, _mm_set1_ps(pl.normal.y)));
+            d = _mm_add_ps(d, _mm_mul_ps(z, _mm_set1_ps(pl.normal.z)));
+            return _mm_sub_ps(d, _mm_set1_ps(pl.dist));
+        }
+
         // plane distances for points[0..3] (aos, 12 byte stride) evaluated
         // per lane in exactly the scalar order ((x*nx + y*ny) + z*nz) - dist,
         // so the results are bit identical to the scalar loop; the three
@@ -68,10 +74,7 @@ namespace vis
             __m128 x = _mm_shuffle_ps(a, t2, _MM_SHUFFLE(2, 0, 3, 0));  // x0 x1 x2 x3
             __m128 y = _mm_shuffle_ps(t1, t2, _MM_SHUFFLE(3, 1, 2, 0)); // y0 y1 y2 y3
             __m128 z = _mm_shuffle_ps(t1, c, _MM_SHUFFLE(3, 0, 3, 1));  // z0 z1 z2 z3
-            __m128 d = _mm_add_ps(_mm_mul_ps(x, _mm_set1_ps(pl.normal.x)),
-                                  _mm_mul_ps(y, _mm_set1_ps(pl.normal.y)));
-            d = _mm_add_ps(d, _mm_mul_ps(z, _mm_set1_ps(pl.normal.z)));
-            return _mm_sub_ps(d, _mm_set1_ps(pl.dist));
+            return plane_dists(x, y, z, pl);
         }
 #endif
 
@@ -89,7 +92,8 @@ namespace vis
             // array size
             float dists[max_points_on_winding + 1];
             int sides[max_points_on_winding + 1];
-            int counts[3] = {};
+            bool has_front = false;
+            bool has_back = false;
             float dot_value;
             math::vec3v mid;
 
@@ -106,25 +110,43 @@ namespace vis
                 const __m128 negeps = _mm_set1_ps(-(float)on_epsilon);
                 const __m128i back_side = _mm_set1_epi32(side_back);
                 const __m128i on_side = _mm_set1_epi32(side_on);
-                static constexpr int popcount4[16] = {0, 1, 1, 2, 1, 2, 2, 3,
-                                                      1, 2, 2, 3, 2, 3, 3, 4};
-                for (; i + 4 <= in_numpoints; i += 4)
+                const bool single_group = in_numpoints > 0 && in_numpoints <= 4;
+                const int lane_mask = single_group ? (1 << in_numpoints) - 1 : 15;
+                const int simd_points = single_group ? 4 : in_numpoints & ~3;
+                for (; i < simd_points; i += 4)
                 {
-                    __m128 d = plane_dists4(&in->points[i], *split);
-                    _mm_storeu_ps(&dists[i], d);
+                    __m128 d = single_group
+                        ? plane_dists(_mm_load_ps(in->small_points[0]),
+                                      _mm_load_ps(in->small_points[1]),
+                                      _mm_load_ps(in->small_points[2]), *split)
+                        : plane_dists4(&in->points[i], *split);
                     __m128i front = _mm_castps_si128(_mm_cmpgt_ps(d, eps));
                     __m128i back = _mm_castps_si128(_mm_cmplt_ps(d, negeps));
+                    const int frontmask = _mm_movemask_ps(_mm_castsi128_ps(front)) & lane_mask;
+                    const int backmask = _mm_movemask_ps(_mm_castsi128_ps(back)) & lane_mask;
+                    if (single_group)
+                    {
+                        // Most small windings are wholly on one side. Avoid
+                        // writing distances and edge classifications for them.
+                        if (!backmask)
+                            return in;
+                        if (!frontmask)
+                        {
+                            free_stack_winding(in, stack);
+                            return nullptr;
+                        }
+                    }
                     // side_front = 0, side_back = 1, side_on = 2
                     __m128i side = _mm_or_si128(
                         _mm_and_si128(back, back_side),
                         _mm_andnot_si128(_mm_or_si128(front, back), on_side));
+                    _mm_storeu_ps(&dists[i], d);
                     _mm_storeu_si128((__m128i *)&sides[i], side);
-                    const int frontmask = _mm_movemask_ps(_mm_castsi128_ps(front));
-                    const int backmask = _mm_movemask_ps(_mm_castsi128_ps(back));
-                    counts[side_front] += popcount4[frontmask];
-                    counts[side_back] += popcount4[backmask];
-                    counts[side_on] += 4 - popcount4[frontmask | backmask];
+                    has_front |= frontmask != 0;
+                    has_back |= backmask != 0;
                 }
+                if (single_group)
+                    i = in_numpoints;
             }
 #endif
             for (; i < in_numpoints; i++)
@@ -138,12 +160,13 @@ namespace vis
                     sides[i] = side_back;
                 else
                     sides[i] = side_on;
-                counts[sides[i]]++;
+                has_front |= sides[i] == side_front;
+                has_back |= sides[i] == side_back;
             }
 
-            if (!counts[1])
+            if (!has_back)
                 return in;
-            if (!counts[0])
+            if (!has_front)
             {
                 free_stack_winding(in, stack);
                 return nullptr;
@@ -217,6 +240,7 @@ namespace vis
             }
 
             free_stack_winding(in, stack);
+            neww->pack_small_points();
             return neww;
         }
 
@@ -232,6 +256,25 @@ namespace vis
             }
             stack->clip_plane[stack->clip_plane_count] = *split;
             stack->clip_plane_count++;
+        }
+
+        bool normalize_separator(math::vec3v &normal)
+        {
+            const double length = std::sqrt((double)math::dot(normal, normal));
+            // Match math::normalize's float return value at the cutoff.
+            if ((float)length < on_epsilon)
+                return false;
+#if HLTOOLS_VIS_SSE2
+            const __m128d xy = _mm_setr_pd(normal.x, normal.y);
+            const __m128 normalized = _mm_cvtpd_ps(_mm_div_pd(xy, _mm_set1_pd(length)));
+            normal.x = _mm_cvtss_f32(normalized);
+            normal.y = _mm_cvtss_f32(_mm_shuffle_ps(normalized, normalized, _MM_SHUFFLE(1, 1, 1, 1)));
+#else
+            normal.x = (float)(normal.x / length);
+            normal.y = (float)(normal.y / length);
+#endif
+            normal.z = (float)(normal.z / length);
+            return true;
         }
 
         winding *clip_to_separators(const winding *source, const winding *pass, winding *target,
@@ -256,7 +299,7 @@ namespace vis
                 {
                     math::subtract(pass->points[j], source->points[i], v2);
                     math::cross(v1, v2, sep_plane.normal);
-                    if (math::normalize(sep_plane.normal) < on_epsilon)
+                    if (!normalize_separator(sep_plane.normal))
                         continue;
                     sep_plane.dist = math::dot(pass->points[j], sep_plane.normal);
 
