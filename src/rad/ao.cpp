@@ -115,12 +115,10 @@ namespace rad
         const double dv = sampling::hash_unit(seed * 0x9e3779b9u + 0x1u);
         const double dw = sampling::hash_unit(seed * 0x9e3779b9u + 0x2u);
 
-        // unanimous probe: open sky and sealed cavities are both extremely
-        // common and both are decided by the first few well spread rays. only
-        // a unanimous verdict short circuits, so a sample with any occlusion
-        // structure at all still gets the full budget
-        const int probe = (rays >= 32) ? rays / 4 : rays;
-
+        // every ray is traced. a unanimous first quarter cannot be taken as
+        // the answer: a crease or a small occluder that covers a few percent
+        // of the hemisphere slips between the probe rays, and the sample then
+        // reads as completely open
         vec_t occluded = 0;
         int traced = 0;
 
@@ -173,18 +171,6 @@ namespace rad
                     {
                         occluded += 1 - (passthrough < 0 ? 0 : passthrough);
                     }
-                }
-            }
-
-            if (traced == probe && probe < rays)
-            {
-                if (occluded <= 0)
-                {
-                            return 0; // nothing above this sample at all
-                }
-                if (occluded >= (vec_t)probe)
-                {
-                            return 1; // sealed in every probed direction
                 }
             }
         }

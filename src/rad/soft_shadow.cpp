@@ -62,12 +62,10 @@ namespace rad
         const double du = sampling::hash_unit(seed + 0u);
         const double dv = sampling::hash_unit(seed + 1u);
 
-        // umbra and full light are both decided unanimously, and between them
-        // they are almost the whole map: only the penumbra band needs the full
-        // budget. the probe is the first quarter of the sequence, which is
-        // already spread over the whole disc rather than clustered
-        const int probe = samples >= 8 ? samples / 4 : samples;
-
+        // every sample is traced. a unanimous first quarter cannot be taken as
+        // the answer: an occluder that hides a few percent of the disc slips
+        // between the probe rays, and the luxels of every narrow penumbra then
+        // come out fully lit
         int visible = 0;
         int traced = 0;
         vec3v transparency_sum{};
@@ -113,21 +111,6 @@ namespace rad
                         opaquestyle_out = opaquestyle;
                     }
                     visible++;
-                }
-            }
-
-            if (traced == probe && probe < samples)
-            {
-                if (visible == 0)
-                {
-                    return 0; // fully in shadow of the whole disc
-                }
-                if (visible == traced)
-                {
-                    // fully lit: the transparency measured so far is the
-                    // answer, since every remaining ray would agree
-                    math::scale(transparency_sum, (vec_t)1 / (vec_t)visible, transparency_out);
-                    return 1;
                 }
             }
         }
