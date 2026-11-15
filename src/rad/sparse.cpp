@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -226,17 +228,45 @@ namespace rad
 
         thread_local std::vector<byte> tls_vis_bits;
 
-        // one work item per vis leaf; runs on multiple threads
-        void build_vis_leafs_item(rad_state &state, int i,
-                                  const std::vector<std::vector<patch *>> &patches_by_leaf,
-                                  const std::vector<int> &unindexed_faces)
+        // a slice of one source leaf's patches; big leaves are cut into
+        // several slices so one dense leaf cannot leave the phase running on
+        // a single thread (furame: 56 leaves, the last one ran alone ~7s)
+        struct vis_leaf_slice
         {
-            i++; // skip leaf 0
-            const std::vector<patch *> &sources = patches_by_leaf[(size_t)i];
-            if (sources.empty())
-                return;
+            int leaf;
+            unsigned begin;
+            unsigned end;
+        };
 
-            byte pvs[(limits::max_map_leafs + 7) / 8];
+        // per thread cache of the source leaf's pvs and candidate faces;
+        // slices of one leaf are handed out back to back, so a thread usually
+        // reuses it. keyed by a per build generation because the calling
+        // thread's thread_locals outlive one threads::run
+        struct vis_leaf_cache
+        {
+            unsigned generation = 0;
+            int leaf = -1;
+            bool active = false;
+            std::vector<byte> pvs;
+            std::vector<int> candidates;
+        };
+        thread_local vis_leaf_cache tls_leaf_cache;
+        std::atomic<unsigned> g_vis_generation{0};
+
+        // returns false when the leaf contributes no columns
+        bool prepare_vis_leaf(rad_state &state, int i, unsigned generation,
+                              const std::vector<std::vector<patch *>> &patches_by_leaf,
+                              const std::vector<int> &unindexed_faces)
+        {
+            vis_leaf_cache &c = tls_leaf_cache;
+            if (c.generation == generation && c.leaf == i)
+                return c.active;
+            c.generation = generation;
+            c.leaf = i;
+            c.active = false;
+            c.candidates.clear();
+            c.pvs.assign((limits::max_map_leafs + 7) / 8, 0);
+            byte *pvs = c.pvs.data();
             const format::dleaf_t &srcleaf = state.map->leafs[(size_t)i];
             if (state.map->visibility.empty())
             {
@@ -246,9 +276,9 @@ namespace rad
             {
                 if (srcleaf.visofs == -1)
                 {
-                    return;
+                    return false;
                 }
-                decompress_vis(state, &state.map->visibility[(size_t)srcleaf.visofs], pvs, sizeof(pvs));
+                decompress_vis(state, &state.map->visibility[(size_t)srcleaf.visofs], pvs, (unsigned)c.pvs.size());
             }
 
             // Every patch in this source leaf shares its PVS. Cull whole
@@ -263,20 +293,32 @@ namespace rad
                 for (const patch *target : patches_by_leaf[leaf])
                     visible_faces[(size_t)target->facenumber] = 1;
             }
-            std::vector<int> candidates;
             for (size_t face = 0; face < visible_faces.size(); face++)
             {
                 if (visible_faces[face])
-                    candidates.push_back((int)face);
+                    c.candidates.push_back((int)face);
             }
+            c.active = true;
+            return true;
+        }
 
-            for (const patch *pt : sources)
+        // one work item per leaf slice; runs on multiple threads
+        void build_vis_slice_item(rad_state &state, const vis_leaf_slice &slice, unsigned generation,
+                                  const std::vector<std::vector<patch *>> &patches_by_leaf,
+                                  const std::vector<int> &unindexed_faces)
+        {
+            if (!prepare_vis_leaf(state, slice.leaf, generation, patches_by_leaf, unindexed_faces))
+                return;
+            const vis_leaf_cache &c = tls_leaf_cache;
+            const std::vector<patch *> &sources = patches_by_leaf[(size_t)slice.leaf];
+            for (unsigned s = slice.begin; s < slice.end; s++)
             {
+                const patch *pt = sources[s];
                 const unsigned patchnum = (unsigned)(pt - state.patches.data());
                 tls_vis_bits.assign((state.num_patches + 7) / 8, 0);
-                auto target = std::upper_bound(candidates.begin(), candidates.end(), pt->facenumber);
-                for (; target != candidates.end(); ++target)
-                    test_patch_to_face(state, patchnum, *target, pvs, tls_vis_bits);
+                auto target = std::upper_bound(c.candidates.begin(), c.candidates.end(), pt->facenumber);
+                for (; target != c.candidates.end(); ++target)
+                    test_patch_to_face(state, patchnum, *target, c.pvs.data(), tls_vis_bits);
                 set_vis_column(state, patchnum, tls_vis_bits);
             }
         }
@@ -505,7 +547,7 @@ namespace rad
         }
 #endif
 
-        void build_vis_matrix(rad_state &state)
+        void build_vis_matrix(rad_state &state, bool show_progress)
         {
             state.sparse_columns.assign(state.num_patches, sparse_column{});
 
@@ -515,7 +557,7 @@ namespace rad
             // pvs cull and alternate origin hunts, not the traces, and the
             // segment upload/readback outweighs the ray savings kept behind
             // an env switch as the base for a future overlap pipelined try
-            if (state.options.gpu && std::getenv("HLTOOLS_GPU_VISMATRIX")
+            if (show_progress && state.options.gpu && std::getenv("HLTOOLS_GPU_VISMATRIX")
                 && gpu_build_vis_matrix(state))
             {
                 return;
@@ -535,9 +577,39 @@ namespace rad
                         unindexed_faces.push_back((int)face);
                 }
             }
-            threads::run_phase("lighting", "building patch visibility", visleafs, [&](int i) {
-                build_vis_leafs_item(state, i, patches_by_leaf, unindexed_faces);
-            });
+            // slice size: small leaves stay whole (one candidate build each),
+            // dense leaves split so the tail is a fraction of a percent
+            const unsigned slice_patches = std::max<unsigned>(
+                32u, state.num_patches / (unsigned)(std::max(1, threads::count()) * 32));
+            std::vector<vis_leaf_slice> slices;
+            for (int leaf = 1; leaf <= visleafs; leaf++)
+            {
+                const unsigned n = (unsigned)patches_by_leaf[(size_t)leaf].size();
+                for (unsigned b = 0; b < n; b += slice_patches)
+                    slices.push_back({leaf, b, std::min(n, b + slice_patches)});
+            }
+            const unsigned generation = ++g_vis_generation;
+            auto item = [&](int i) {
+                build_vis_slice_item(state, slices[(size_t)i], generation, patches_by_leaf, unindexed_faces);
+            };
+            if (show_progress)
+            {
+                threads::run_phase("lighting", "building patch visibility", (int)slices.size(), item);
+            }
+            else
+            {
+                // built in the background during the gpu gather: yield to the
+                // near pair resolution, which the gather's end waits on
+                threads::run((int)slices.size(), [&](int i) {
+                    thread_local unsigned lowered = 0;
+                    if (lowered != generation)
+                    {
+                        threads::lower_current_priority();
+                        lowered = generation;
+                    }
+                    item(i);
+                });
+            }
         }
 
         void free_vis_matrix(rad_state &state)
@@ -566,6 +638,20 @@ namespace rad
         }
     }
 
+    bool can_prebuild_sparse_vis_matrix(const rad_state &state)
+    {
+        // -incremental may skip the build by reading the transfers back
+        return state.options.numbounce > 0 && !state.options.incremental
+            && state.options.method == vis_method::sparse_vismatrix
+            && (int)state.num_patches < max_sparse_vismatrix_patches;
+    }
+
+    void prebuild_sparse_vis_matrix(rad_state &state)
+    {
+        build_vis_matrix(state, false);
+        state.sparse_columns_prebuilt = true;
+    }
+
     void make_scales_sparse_vismatrix(rad_state &state)
     {
         err::require((int)state.num_patches < max_sparse_vismatrix_patches,
@@ -576,7 +662,9 @@ namespace rad
         if (!state.options.incremental || !read_transfers(state, transferfile.c_str(), (long)state.num_patches))
         {
             // determine visibility between patches
-            build_vis_matrix(state);
+            if (!state.sparse_columns_prebuilt)
+                build_vis_matrix(state, true);
+            state.sparse_columns_prebuilt = false;
             dump_vismatrix_info(state);
             state.check_vis_bit = check_vis_bit_sparse;
 

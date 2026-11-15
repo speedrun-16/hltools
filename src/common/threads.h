@@ -23,4 +23,9 @@ namespace threads
     // pass section = nullptr to keep the current section
     void run_phase(const char *section, const char *name, int work_count,
                    const std::function<void(int)> &work_fn);
+
+    // drop the calling thread below normal priority, for work that only has
+    // to finish before a later phase and should yield to the critical path
+    // (no-op where the platform offers no per thread priority)
+    void lower_current_priority();
 }

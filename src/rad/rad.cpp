@@ -1,10 +1,12 @@
 #include "rad.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "../common/error.h"
 #include "../common/filesystem.h"
@@ -690,18 +692,99 @@ namespace rad
             // the gpu (collect pass + kernel + near pairs) and the phase
             // below consumes the stored results
             bool gpu_lighting = false;
+            // while the gpu gathers, the cpu is mostly idle: build the patch
+            // visibility for the bounces then (it reads geometry only, the
+            // direct lighting passes write lighting fields only)
+            std::thread visibility_worker;
+            double visibility_seconds = 0.0;
             if (state.options.gpu)
-                gpu_lighting = gpu_gather_run(state);
+                gpu_lighting = gpu_gather_run(state, [&]()
+                    {
+                        if (!can_prebuild_sparse_vis_matrix(state))
+                            return;
+                        visibility_worker = std::thread([&]()
+                            {
+                                const auto started = std::chrono::steady_clock::now();
+                                prebuild_sparse_vis_matrix(state);
+                                visibility_seconds = std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - started).count();
+                            });
+                    });
             if (state.options.dumpgather)
                 state.gather_dump.resize(map.faces.size());
-            threads::run_phase("lighting", "building direct lighting", (int)map.faces.size(),
-                               [&](int i)
-                               {
-                                   gpu_gather_begin_face(i);
-                                   build_facelights(state, i);
-                               });
+            auto join_visibility_worker = [&]()
+            {
+                if (!visibility_worker.joinable())
+                    return;
+                const auto waited = std::chrono::steady_clock::now();
+                visibility_worker.join();
+                const double wait_seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - waited).count();
+                progress::summary("building patch visibility", "(during gpu gather)", visibility_seconds);
+                logging::file("      patch visibility overlapped the gpu gather; waited %.2fs for it\n",
+                              wait_seconds);
+            };
+            const int numfaces = (int)map.faces.size();
+            auto direct_item = [&](int i)
+            {
+                gpu_gather_begin_face(i);
+                build_facelights(state, i);
+            };
+            // with the gpu gather done, the direct lighting pass is cpu only
+            // while the light transfers are mostly gpu work: run the pass in
+            // the background during the transfers. the transfers read patch
+            // geometry and the patch visibility only, the pass writes face and
+            // patch lighting only, so neither sees the other's writes
+            const bool transfers_during_lighting = gpu_lighting && state.options.numbounce > 0;
+            if (transfers_during_lighting)
+            {
+                join_visibility_worker();
+                std::atomic<int> lit_faces{0};
+                double lighting_seconds = 0.0;
+                std::thread lighting_worker([&]()
+                    {
+                        const auto started = std::chrono::steady_clock::now();
+                        threads::run(numfaces, [&](int i)
+                                     {
+                                         direct_item(i);
+                                         lit_faces.fetch_add(1, std::memory_order_relaxed);
+                                     });
+                        lighting_seconds = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started).count();
+                    });
+
+                // build transfer lists; the "computing light transfers" bar is
+                // drawn from inside
+                make_scales_stub(state);
+
+                if (lit_faces.load() < numfaces)
+                {
+                    // still lighting: show its bar for the remainder
+                    progress::section("lighting");
+                    progress::begin("building direct lighting", numfaces);
+                    int done;
+                    while ((done = lit_faces.load()) < numfaces)
+                    {
+                        progress::set(done);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    }
+                    lighting_worker.join();
+                    progress::set(numfaces);
+                    progress::end();
+                }
+                else
+                {
+                    lighting_worker.join();
+                    progress::summary("building direct lighting", "(during light transfers)", lighting_seconds);
+                }
+            }
+            else
+            {
+                threads::run_phase("lighting", "building direct lighting", numfaces, direct_item);
+            }
             if (gpu_lighting)
                 gpu_gather_finish(state);
+            join_visibility_worker();
 
             if (state.options.dumpgather)
             {
@@ -734,7 +817,8 @@ namespace rad
             {
                 // build transfer lists; the "building patch visibility" and
                 // "computing light transfers" bars are drawn from inside
-                make_scales_stub(state);
+                if (!transfers_during_lighting)
+                    make_scales_stub(state);
 
                 // these arrays are only used in collect_light, gather_light and bounce_light
                 bounce_arrays ba;

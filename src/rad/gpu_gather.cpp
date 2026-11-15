@@ -20,6 +20,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -29,6 +33,12 @@
 #include <vector>
 
 #include "gpu/gpu.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace rad
 {
@@ -304,6 +314,153 @@ namespace rad
     namespace
     {
         thread_local int t_current_face = -1;
+
+        // the dispatch loop mostly sleeps in the fence wait while cpu work
+        // (near pairs, the patch visibility) saturates every core; keep its
+        // wake up prompt so the gpu is not left idle and the dispatch times
+        // the chunk controller steers by are not inflated by scheduling
+        class dispatch_thread_priority
+        {
+        public:
+            dispatch_thread_priority()
+            {
+#ifdef _WIN32
+                previous_ = GetThreadPriority(GetCurrentThread());
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
+            }
+            ~dispatch_thread_priority()
+            {
+#ifdef _WIN32
+                SetThreadPriority(GetCurrentThread(), previous_);
+#endif
+            }
+
+        private:
+            [[maybe_unused]] int previous_ = 0;
+        };
+
+        // resolves the near pairs of finished gather chunks on the cpu while
+        // the gpu runs the next chunk. a chunk's items are final once
+        // gather_batch returns, and every pair of an item comes back with the
+        // chunk that holds the item, so per item the pairs are still applied
+        // in ascending light order onto the finished gpu sum, exactly as the
+        // serial pass after the gather did
+        class near_pair_pipeline
+        {
+        public:
+            using resolve_fn = std::function<void(const gpu::near_pair &)>;
+
+            explicit near_pair_pipeline(resolve_fn fn) : resolve_(std::move(fn))
+            {
+                worker_ = std::thread([this] { loop(); });
+            }
+            ~near_pair_pipeline() { stop(); }
+
+            // pairs carry chunk relative item indices
+            void push(size_t base, const std::vector<gpu::near_pair> &chunk_pairs)
+            {
+                if (chunk_pairs.empty())
+                    return;
+                job j;
+                j.pairs.reserve(chunk_pairs.size());
+                for (gpu::near_pair pair : chunk_pairs)
+                {
+                    pair.item += (uint32_t)base;
+                    j.pairs.push_back(pair);
+                }
+                total_ += j.pairs.size();
+                std::lock_guard<std::mutex> guard(mutex_);
+                jobs_.push_back(std::move(j));
+                cv_.notify_one();
+            }
+
+            // stop taking queued chunks; the chunk in flight completes
+            void stop()
+            {
+                {
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    stopping_ = true;
+                    cv_.notify_one();
+                }
+                if (worker_.joinable())
+                    worker_.join();
+            }
+
+            // resolve whatever the background worker had not reached, with
+            // the progress bar the serial pass used to draw
+            void finish()
+            {
+                stop();
+                std::vector<gpu::near_pair> rest;
+                for (job &j : jobs_)
+                    rest.insert(rest.end(), j.pairs.begin(), j.pairs.end());
+                jobs_.clear();
+                std::vector<std::pair<size_t, size_t>> runs;
+                prepare(rest, runs);
+                threads::run_phase("lighting", "resolving near texlights", (int)runs.size(),
+                                   [&](int run) { resolve_run(rest, runs[(size_t)run]); });
+            }
+
+            size_t total() const { return total_; }
+
+        private:
+            struct job
+            {
+                std::vector<gpu::near_pair> pairs;
+            };
+
+            static void prepare(std::vector<gpu::near_pair> &pairs,
+                                std::vector<std::pair<size_t, size_t>> &runs)
+            {
+                std::sort(pairs.begin(), pairs.end(),
+                          [](const gpu::near_pair &a, const gpu::near_pair &b)
+                          {
+                              return a.item != b.item ? a.item < b.item : a.light < b.light;
+                          });
+                for (size_t i = 0; i < pairs.size();)
+                {
+                    size_t j = i;
+                    while (j < pairs.size() && pairs[j].item == pairs[i].item)
+                        j++;
+                    runs.emplace_back(i, j);
+                    i = j;
+                }
+            }
+
+            void resolve_run(const std::vector<gpu::near_pair> &pairs, std::pair<size_t, size_t> run) const
+            {
+                for (size_t p = run.first; p < run.second; p++)
+                    resolve_(pairs[p]);
+            }
+
+            void loop()
+            {
+                for (;;)
+                {
+                    job j;
+                    {
+                        std::unique_lock<std::mutex> guard(mutex_);
+                        cv_.wait(guard, [this] { return stopping_ || !jobs_.empty(); });
+                        if (stopping_)
+                            return;
+                        j = std::move(jobs_.front());
+                        jobs_.pop_front();
+                    }
+                    std::vector<std::pair<size_t, size_t>> runs;
+                    prepare(j.pairs, runs);
+                    threads::run((int)runs.size(), [&](int run) { resolve_run(j.pairs, runs[(size_t)run]); });
+                }
+            }
+
+            resolve_fn resolve_;
+            std::thread worker_;
+            std::mutex mutex_;
+            std::condition_variable cv_;
+            std::deque<job> jobs_;
+            bool stopping_ = false;
+            size_t total_ = 0;
+        };
     }
 
     void gpu_gather_begin_face(int facenum)
@@ -433,7 +590,7 @@ namespace rad
         }
     }
 
-    bool gpu_gather_run(rad_state &state)
+    bool gpu_gather_run(rad_state &state, const std::function<void()> &after_collect)
     {
         const format::map_data &map = *state.map;
 
@@ -508,6 +665,9 @@ namespace rad
             return false;
         }
 
+        if (after_collect)
+            after_collect();
+
         // pvs rows to words
         const uint32_t stride_words = (uint32_t)((d->rowbytes + 3) / 4 + 1);
         std::vector<uint32_t> pvs_words(d->pvs_rows.size() * stride_words, 0);
@@ -540,10 +700,27 @@ namespace rad
         logging::file("gpu lighting: %zu bytes per result (style count %u)\n",
                       gpu::gather_results::words_per_item(scene.style_count) * sizeof(uint32_t),
                       scene.style_count);
-        std::vector<gpu::near_pair> near_pairs;
         std::vector<gpu::near_pair> chunk_near;
+        near_pair_pipeline near_resolver(
+            [&](const gpu::near_pair &pair)
+            {
+                const gpu::work_item_gpu &item = d->items[pair.item];
+                const directlight *l = &state.lightarray[pair.light];
+                vec3v pos{item.pos[0], item.pos[1], item.pos[2]};
+                vec3v normal{item.normal[0], item.normal[1], item.normal[2]};
+                vec3v add;
+                if (resolve_near_pair(state, pos, normal, l,
+                                      item.cone_power, item.cone_scale,
+                                      &scene.face_gap[(size_t)item.face * 6], add))
+                {
+                    const int compact = d->style_to_compact[l->style];
+                    const float rgb[3] = {add[0], add[1], add[2]};
+                    d->results.add_color(pair.item, (uint32_t)compact, rgb);
+                }
+            });
         progress::section("lighting");
         progress::begin("gathering light on the gpu", (int)d->items.size());
+        dispatch_thread_priority dispatch_priority;
         size_t chunk = d->items.size() < gather_chunk_start
             ? d->items.size() : gather_chunk_start;
         size_t chunk_lo = chunk;
@@ -571,6 +748,7 @@ namespace rad
                               " %.3fs total, %.3fs slowest)\n",
                               dispatches + 1, base, d->items.size(), count, elapsed,
                               dispatches, spent, slowest);
+                near_resolver.stop(); // it writes into d->results
                 gpu::gather_end();
                 logging::warn("-gpu: %s; using the cpu path", gpu::last_error().c_str());
                 state.gpu_gather_phase = 0;
@@ -581,11 +759,7 @@ namespace rad
             spent += elapsed;
             if (elapsed > slowest)
                 slowest = elapsed;
-            for (gpu::near_pair pair : chunk_near)
-            {
-                pair.item += (uint32_t)base;
-                near_pairs.push_back(pair);
-            }
+            near_resolver.push(base, chunk_near);
             base += count;
             progress::add((int)count);
 
@@ -641,47 +815,9 @@ namespace rad
                       dispatches, spent, slowest);
         gpu::gather_end();
 
-        // resolve the surface near branch pairs with the reference code, in
-        // parallel: pairs are grouped by item so each worker owns its items'
-        // results, and sorted by light so the merge order is deterministic
-        // (ascending, like the cpu's light loop)
-        std::sort(near_pairs.begin(), near_pairs.end(),
-                  [](const gpu::near_pair &a, const gpu::near_pair &b)
-                  {
-                      return a.item != b.item ? a.item < b.item : a.light < b.light;
-                  });
-        std::vector<std::pair<size_t, size_t>> near_runs; // [first, last) into near_pairs
-        for (size_t i = 0; i < near_pairs.size();)
-        {
-            size_t j = i;
-            while (j < near_pairs.size() && near_pairs[j].item == near_pairs[i].item)
-                j++;
-            near_runs.emplace_back(i, j);
-            i = j;
-        }
-        threads::run_phase("lighting", "resolving near texlights", (int)near_runs.size(),
-                           [&](int run)
-                           {
-                               for (size_t p = near_runs[(size_t)run].first;
-                                    p < near_runs[(size_t)run].second; p++)
-                               {
-                                   const gpu::near_pair &pair = near_pairs[p];
-                                   const gpu::work_item_gpu &item = d->items[pair.item];
-                                   const directlight *l = &state.lightarray[pair.light];
-                                   vec3v pos{item.pos[0], item.pos[1], item.pos[2]};
-                                   vec3v normal{item.normal[0], item.normal[1], item.normal[2]};
-                                   vec3v add;
-                                   if (resolve_near_pair(state, pos, normal, l,
-                                                         item.cone_power, item.cone_scale,
-                                                         &scene.face_gap[(size_t)item.face * 6], add))
-                                   {
-                                       const int compact = d->style_to_compact[l->style];
-                                       const float rgb[3] = {add[0], add[1], add[2]};
-                                       d->results.add_color(pair.item, (uint32_t)compact, rgb);
-                                   }
-                               }
-                           });
-        const size_t near_total = near_pairs.size();
+        // resolve the near pairs the background worker had not reached
+        near_resolver.finish();
+        const size_t near_total = near_resolver.total();
 
         // diagnostic counts go to the logfile only; the device itself is
         // already on the console in the settings table
@@ -722,7 +858,7 @@ namespace rad
 
 namespace rad
 {
-    bool gpu_gather_run(rad_state &state)
+    bool gpu_gather_run(rad_state &state, const std::function<void()> &)
     {
         logging::warn("-gpu: this build has no gpu backend; using the cpu path");
         return false;

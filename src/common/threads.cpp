@@ -4,6 +4,12 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include "progress.h"
 
 namespace threads
@@ -50,6 +56,13 @@ namespace threads
         pump();
         for (auto &th : pool)
             th.join();
+    }
+
+    void lower_current_priority()
+    {
+#ifdef _WIN32
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
     }
 
     void run_phase(const char *section, const char *name, int work_count,

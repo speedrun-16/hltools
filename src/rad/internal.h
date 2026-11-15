@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -585,6 +586,7 @@ namespace rad
         // method storage: the dense triangular bit matrix or the sparse columns
         std::vector<byte> dense_vismatrix;
         std::vector<sparse_column> sparse_columns;
+        bool sparse_columns_prebuilt = false;
     };
 
     // ===== utilcpp =====
@@ -705,6 +707,11 @@ namespace rad
 
     void make_scales_vismatrix(rad_state &state);
     void make_scales_sparse_vismatrix(rad_state &state);
+    // the sparse patch visibility only reads geometry, so with -gpu it is
+    // built on the cpu while the gather keeps the gpu busy;
+    // make_scales_sparse_vismatrix then reuses it
+    bool can_prebuild_sparse_vis_matrix(const rad_state &state);
+    void prebuild_sparse_vis_matrix(rad_state &state);
     void make_scales_no_vismatrix(rad_state &state);
     bool check_vis_bit_backwards(rad_state &state, unsigned receiver, unsigned emitter,
                                  const vec3v &backorigin, const vec3v &backnormal, vec3v &transparency_out);
@@ -769,7 +776,9 @@ namespace rad
     // build_facelights phase will make, runs them on the gpu (surface
     // near branch pairs resolved on the cpu), and leaves the state in
     // consume mode; returns false (with a warning) to fall back to the cpu
-    bool gpu_gather_run(rad_state &state);
+    // after_collect runs once the collect pass is done and the gpu work is
+    // about to start (not at all when the run bails out before that)
+    bool gpu_gather_run(rad_state &state, const std::function<void()> &after_collect = {});
     void gpu_gather_finish(rad_state &state);
     // records which face's build_facelights this thread is running; the
     // intercept groups work by the calling face (a sample's
