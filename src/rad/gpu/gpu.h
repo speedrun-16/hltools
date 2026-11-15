@@ -256,6 +256,12 @@ namespace rad
             std::vector<int32_t> sky_levels;  // (offset, count) per level
         };
 
+        // stages the scene on the device for the formfactor_batch calls that
+        // pass this same scene object, until formfactor_end; without it every
+        // batch uploads the scene again
+        bool formfactor_begin(const formfactor_scene &scene);
+        void formfactor_end();
+
         // computes one transfer factor per pair; nan marks pairs the host
         // must recompute (emitter winding too large for the kernel)
         bool formfactor_batch(const formfactor_scene &scene,

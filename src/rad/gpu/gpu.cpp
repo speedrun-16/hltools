@@ -478,6 +478,90 @@ namespace rad
                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
             }
 
+            // read only scene data the kernels index at random (bsp nodes,
+            // lights, patches, windings): host visible memory is system ram
+            // on a discrete gpu, read over pci express on every cache miss,
+            // so stage it once into device local buffers. the bytes the
+            // kernels read are the same, only where they live changes
+            class device_uploader
+            {
+            public:
+                ~device_uploader()
+                {
+                    for (gpu_buffer &b : staging_)
+                        b.destroy();
+                }
+
+                // creates `out` (device local where the device has such a
+                // heap) and queues the copy of `size` bytes of `data`; zero
+                // sized arrays get a dummy 16 byte buffer the kernel never
+                // indexes, like the host buffers
+                bool add(gpu_buffer &out, const void *data, size_t size)
+                {
+                    const VkDeviceSize alloc = size ? (VkDeviceSize)size : 16;
+                    if (!create_buffer(out, alloc,
+                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false))
+                        return false;
+                    if (!size)
+                        return true;
+                    staging_.emplace_back();
+                    if (!create_buffer(staging_.back(), alloc, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true))
+                        return false;
+                    std::memcpy(staging_.back().mapped, data, size);
+                    copies_.push_back({staging_.back().buffer, out.buffer, (VkDeviceSize)size});
+                    return true;
+                }
+
+                // runs every queued copy in one submission and waits for it
+                bool flush()
+                {
+                    if (copies_.empty())
+                        return true;
+                    g.fn.ResetCommandPool(g.device, g.command_pool, 0);
+                    VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                    g.fn.BeginCommandBuffer(g.command_buffer, &cbbi);
+                    for (const copy &c : copies_)
+                    {
+                        VkBufferCopy region = {0, 0, c.size};
+                        g.fn.CmdCopyBuffer(g.command_buffer, c.src, c.dst, 1, &region);
+                    }
+                    VkMemoryBarrier to_shader = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    to_shader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    g.fn.CmdPipelineBarrier(g.command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &to_shader,
+                                            0, nullptr, 0, nullptr);
+                    g.fn.EndCommandBuffer(g.command_buffer);
+                    g.fn.ResetFences(g.device, 1, &g.fence);
+                    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    submit.commandBufferCount = 1;
+                    submit.pCommandBuffers = &g.command_buffer;
+                    if (g.fn.QueueSubmit(g.queue, 1, &submit, g.fence) != VK_SUCCESS)
+                        return false;
+                    if (g.fn.WaitForFences(g.device, 1, &g.fence, VK_TRUE, ~0ull) != VK_SUCCESS)
+                        return false;
+                    copies_.clear();
+                    for (gpu_buffer &b : staging_)
+                        b.destroy();
+                    staging_.clear();
+                    return true;
+                }
+
+            private:
+                struct copy
+                {
+                    VkBuffer src;
+                    VkBuffer dst;
+                    VkDeviceSize size;
+                };
+                std::vector<gpu_buffer> staging_;
+                std::vector<copy> copies_;
+            };
+
             bool ensure_descriptor_pool_locked()
             {
                 if (g.descriptor_pool)
@@ -921,21 +1005,24 @@ namespace rad
                 (VkDeviceSize)max_chunk_items * gather_results::words_per_item(gsess.style_count)
                 * sizeof(uint32_t);
 
-            bool ok = upload(gsess.scene_bufs[0], scene.tnodes.data(),
-                             scene.tnodes.size() * sizeof(tnode_gpu))
-                && upload(gsess.scene_bufs[1], scene.lightleafs.data(),
+            device_uploader staged;
+            auto upload_scene = [&](gpu_buffer &buf, const void *data, size_t size)
+            { return staged.add(buf, data, size); };
+            bool ok = upload_scene(gsess.scene_bufs[0], scene.tnodes.data(),
+                                   scene.tnodes.size() * sizeof(tnode_gpu))
+                && upload_scene(gsess.scene_bufs[1], scene.lightleafs.data(),
                           scene.lightleafs.size() * sizeof(lightleaf_gpu))
-                && upload(gsess.scene_bufs[2], scene.lights.data(),
+                && upload_scene(gsess.scene_bufs[2], scene.lights.data(),
                           scene.lights.size() * sizeof(light_gpu))
-                && upload(gsess.scene_bufs[3], scene.sun_normals.data(),
+                && upload_scene(gsess.scene_bufs[3], scene.sun_normals.data(),
                           scene.sun_normals.size() * sizeof(float))
-                && upload(gsess.scene_bufs[4], scene.sky_normals.data(),
+                && upload_scene(gsess.scene_bufs[4], scene.sky_normals.data(),
                           scene.sky_normals.size() * sizeof(float))
-                && upload(gsess.scene_bufs[5], vis_list.data(),
+                && upload_scene(gsess.scene_bufs[5], vis_list.data(),
                           vis_list.size() * sizeof(uint32_t))
-                && upload(gsess.scene_bufs[6], scene.face_gap.data(),
+                && upload_scene(gsess.scene_bufs[6], scene.face_gap.data(),
                           scene.face_gap.size() * sizeof(float))
-                && upload(gsess.scene_bufs[7], vis_range.data(),
+                && upload_scene(gsess.scene_bufs[7], vis_range.data(),
                           vis_range.size() * sizeof(uint32_t))
                 && create_host_buffer(gsess.item_buf,
                                       (VkDeviceSize)max_chunk_items * sizeof(work_item_gpu))
@@ -948,7 +1035,8 @@ namespace rad
                 && create_buffer(gsess.readback_buf, results_size,
                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true);
+                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true)
+                && staged.flush();
             if (!ok)
             {
                 g.error = "gather_begin: buffer creation failed";
@@ -1144,6 +1232,60 @@ namespace rad
             return ok;
         }
 
+        namespace
+        {
+            // the scene of the formfactor batches between formfactor_begin
+            // and formfactor_end, staged once in device local memory
+            struct formfactor_session
+            {
+                const formfactor_scene *scene = nullptr;
+                gpu_buffer bufs[4]; // patches, windings, sky normals, sky levels
+            };
+            formfactor_session ffsess;
+
+            void formfactor_end_locked()
+            {
+                for (gpu_buffer &b : ffsess.bufs)
+                    b.destroy();
+                ffsess = formfactor_session();
+            }
+        }
+
+        bool formfactor_begin(const formfactor_scene &scene)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            formfactor_end_locked();
+            if (!ensure_device_locked() || !ensure_ff_pipeline_locked())
+                return false;
+            if (scene.patches.empty())
+            {
+                g.error = "formfactor_begin: empty input";
+                return false;
+            }
+            device_uploader staged;
+            const bool ok =
+                staged.add(ffsess.bufs[0], scene.patches.data(), scene.patches.size() * sizeof(patch_gpu))
+                && staged.add(ffsess.bufs[1], scene.windings.data(), scene.windings.size() * sizeof(float))
+                && staged.add(ffsess.bufs[2], scene.sky_normals.data(), scene.sky_normals.size() * sizeof(float))
+                && staged.add(ffsess.bufs[3], scene.sky_levels.data(), scene.sky_levels.size() * sizeof(int32_t))
+                && staged.flush();
+            if (!ok)
+            {
+                g.error = "formfactor_begin: buffer creation failed";
+                formfactor_end_locked();
+                return false;
+            }
+            ffsess.scene = &scene;
+            return true;
+        }
+
+        void formfactor_end()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g.initialized && g.ok)
+                formfactor_end_locked();
+        }
+
         bool formfactor_batch(const formfactor_scene &scene,
                               const std::vector<transfer_pair> &pairs,
                               std::vector<float> &trans)
@@ -1157,6 +1299,7 @@ namespace rad
                 g.error = "formfactor_batch: empty input";
                 return false;
             }
+            const bool staged_scene = ffsess.scene == &scene;
 
             auto upload = [&](gpu_buffer &buf, const void *data, size_t size)
             {
@@ -1178,10 +1321,12 @@ namespace rad
                 readback_buf.destroy();
             };
 
-            bool ok = upload(bufs[0], scene.patches.data(), scene.patches.size() * sizeof(patch_gpu))
-                && upload(bufs[1], scene.windings.data(), scene.windings.size() * sizeof(float))
-                && upload(bufs[2], scene.sky_normals.data(), scene.sky_normals.size() * sizeof(float))
-                && upload(bufs[3], scene.sky_levels.data(), scene.sky_levels.size() * sizeof(int32_t))
+            bool ok = (staged_scene
+                       || (upload(bufs[0], scene.patches.data(), scene.patches.size() * sizeof(patch_gpu))
+                           && upload(bufs[1], scene.windings.data(), scene.windings.size() * sizeof(float))
+                           && upload(bufs[2], scene.sky_normals.data(), scene.sky_normals.size() * sizeof(float))
+                           && upload(bufs[3], scene.sky_levels.data(),
+                                     scene.sky_levels.size() * sizeof(int32_t))))
                 && upload(bufs[4], pairs.data(), pairs.size() * sizeof(transfer_pair))
                 && create_buffer(result_buf, out_size,
                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -1211,9 +1356,10 @@ namespace rad
             }
 
             VkDescriptorBufferInfo infos[6];
+            const gpu_buffer *scene_bufs = staged_scene ? ffsess.bufs : bufs;
             VkBuffer bindings[6] = {
-                bufs[0].buffer, bufs[1].buffer, bufs[2].buffer,
-                bufs[3].buffer, bufs[4].buffer, result_buf.buffer,
+                scene_bufs[0].buffer, scene_bufs[1].buffer, scene_bufs[2].buffer,
+                scene_bufs[3].buffer, bufs[4].buffer, result_buf.buffer,
             };
             VkWriteDescriptorSet writes[6] = {};
             for (uint32_t i = 0; i < 6; i++)
