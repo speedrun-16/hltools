@@ -274,6 +274,7 @@ namespace
             scene.sky_normals.push_back(state.skynormals[skylevel][(size_t)j][2]);
             scene.sky_normals.push_back(state.skynormalsizes[skylevel][(size_t)j]);
         }
+        scene.style_count = (uint32_t)compact_to_style.size();
         scene.sky_lighting_fix = state.options.sky_lighting_fix ? 1 : 0;
         scene.sky_step_match = (state.options.softsky || state.options.fastmode) ? 1 : 0;
         scene.indirect_sun = state.options.indirect_sun;
@@ -408,7 +409,7 @@ namespace
 
         // ---- gpu pass ------------------------------------------------------
         auto gpu_start = std::chrono::steady_clock::now();
-        std::vector<rad::gpu::gather_result_gpu> results;
+        rad::gpu::gather_results results;
         std::vector<rad::gpu::near_pair> near_pairs;
         if (!rad::gpu::gather_batch(scene, items, pvs_words, stride_words, results, near_pairs))
         {
@@ -426,9 +427,9 @@ namespace
             gpu_adds[i].assign(rad::allstyles, vec3v{});
             for (int c = 0; c < (int)compact_to_style.size(); c++)
             {
-                gpu_adds[i][(size_t)compact_to_style[(size_t)c]] =
-                    vec3v{results[i].adds[c * 3 + 0], results[i].adds[c * 3 + 1],
-                          results[i].adds[c * 3 + 2]};
+                float rgb[3];
+                results.read_color(i, (uint32_t)c, rgb);
+                gpu_adds[i][(size_t)compact_to_style[(size_t)c]] = vec3v{rgb[0], rgb[1], rgb[2]};
             }
         }
         for (const rad::gpu::near_pair &pair : near_pairs)

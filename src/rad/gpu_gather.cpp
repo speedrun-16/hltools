@@ -45,7 +45,7 @@ namespace rad
         std::vector<gpu::work_item_gpu> items;   // flat, face major
         std::vector<int> face_first;
         std::vector<int> face_cursor;
-        std::vector<gpu::gather_result_gpu> results;
+        gpu::gather_results results;
         int style_to_compact[allstyles];
         std::vector<int> compact_to_style;
     };
@@ -177,6 +177,7 @@ namespace rad
                 scene.sky_normals.push_back(state.skynormals[skylevel][(size_t)j][2]);
                 scene.sky_normals.push_back(state.skynormalsizes[skylevel][(size_t)j]);
             }
+            scene.style_count = (uint32_t)d.compact_to_style.size();
             scene.sky_lighting_fix = state.options.sky_lighting_fix ? 1 : 0;
             scene.sky_step_match = (state.options.softsky || state.options.fastmode) ? 1 : 0;
             scene.indirect_sun = state.options.indirect_sun;
@@ -339,7 +340,7 @@ namespace rad
 
     void gpu_gather_intercept(rad_state &state, const vec3v &pos, const byte *pvs,
                               const vec3v &normal, vec3v *sample, byte *styles, int step,
-                              int miptex, int texlightgap_surfacenum)
+                              int miptex, int texlightgap_surfacenum, int *cached_pvs_row)
     {
         gpu_gather_data &d = *state.gpu_gather;
         // group by the face whose build_facelights is running, not by the
@@ -367,6 +368,8 @@ namespace rad
             }
             item.step = step;
             item.face = texlightgap_surfacenum; // the kernel's texlightgap axes
+            item.pvs_row = cached_pvs_row ? *cached_pvs_row : -1;
+            if (item.pvs_row < 0)
             {
                 std::lock_guard<std::mutex> guard(d.row_mutex);
                 std::string key((const char *)pvs, d.rowbytes);
@@ -377,6 +380,8 @@ namespace rad
                     d.pvs_rows.emplace_back(pvs, pvs + d.rowbytes);
                 }
                 item.pvs_row = it->second;
+                if (cached_pvs_row)
+                    *cached_pvs_row = item.pvs_row;
             }
             d.face_items[(size_t)facenum].push_back(item);
             return;
@@ -392,21 +397,25 @@ namespace rad
         {
             err::fatal("gpu gather: call order drift on face %d (item %d)", facenum, cursor);
         }
-        const gpu::gather_result_gpu &r = d.results[(size_t)flat];
+        const uint32_t touched_mask = d.results.touched((size_t)flat);
 
         // the same tail merge the cpu gather ends with: coring threshold,
         // style slot assignment, discarded light bookkeeping
         for (int style = 0; style < allstyles; ++style)
         {
             const int compact = d.style_to_compact[style];
-            const bool touched = compact >= 0 && (r.touched & (1u << compact));
+            const bool touched = compact >= 0 && (touched_mask & (1u << compact));
             if (!touched && state.corings[style] >= 0)
             {
                 continue;
             }
             vec3v adds{};
             if (touched)
-                adds = vec3v{r.adds[compact * 3 + 0], r.adds[compact * 3 + 1], r.adds[compact * 3 + 2]};
+            {
+                float rgb[3];
+                d.results.read_color((size_t)flat, (uint32_t)compact, rgb);
+                adds = vec3v{rgb[0], rgb[1], rgb[2]};
+            }
             if (vector_maximum(adds) > state.corings[style] * 0.1)
             {
                 int style_index;
@@ -463,6 +472,16 @@ namespace rad
         if (state.lightarray.empty() || map.faces.empty())
         {
             logging::warn("-gpu: no direct lights; using the cpu path");
+            return false;
+        }
+        if (state.options.soft_samples > 1
+            && std::any_of(state.lightarray.begin(), state.lightarray.end(), [](const directlight &light)
+                           {
+                               return light.radius > 0
+                                   && (light.type == emit_type::point || light.type == emit_type::spotlight);
+                           }))
+        {
+            logging::warn("-gpu: soft shadows on point or spot lights; gathering direct light on the cpu");
             return false;
         }
         if (!gpu::available())
@@ -529,6 +548,12 @@ namespace rad
         // with chunk relative item indices
         const size_t chunk_cap = d->items.size() < gather_chunk_items
             ? d->items.size() : gather_chunk_items;
+        if (!d->results.resize(d->items.size(), scene.style_count))
+        {
+            logging::warn("-gpu: could not allocate gather results; using the cpu path");
+            gpu_gather_finish(state);
+            return false;
+        }
         if (!gpu::gather_begin(scene, pvs_words, stride_words, (uint32_t)chunk_cap))
         {
             logging::warn("-gpu: %s; using the cpu path", gpu::last_error().c_str());
@@ -541,8 +566,11 @@ namespace rad
             if (fp64 && *fp64 && *fp64 != '0')
                 logging::file("gpu lighting: fp64-parity kernel variant active\n");
         }
-        d->results.resize(d->items.size());
+        logging::file("gpu lighting: %zu bytes per result (style count %u)\n",
+                      gpu::gather_results::words_per_item(scene.style_count) * sizeof(uint32_t),
+                      scene.style_count);
         std::vector<gpu::near_pair> near_pairs;
+        std::vector<gpu::near_pair> chunk_near;
         progress::section("lighting");
         progress::begin("gathering light on the gpu", (int)d->items.size());
         size_t chunk = d->items.size() < gather_chunk_start
@@ -557,10 +585,8 @@ namespace rad
         {
             const size_t count = d->items.size() - base < chunk
                 ? d->items.size() - base : chunk;
-            std::vector<gpu::gather_result_gpu> chunk_results;
-            std::vector<gpu::near_pair> chunk_near;
             const auto started = std::chrono::steady_clock::now();
-            const bool ok = gpu::gather_batch(&d->items[base], count, chunk_results, chunk_near);
+            const bool ok = gpu::gather_batch(&d->items[base], count, d->results, base, chunk_near);
             const double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started).count();
             if (!ok)
@@ -583,8 +609,6 @@ namespace rad
             spent += elapsed;
             if (elapsed > slowest)
                 slowest = elapsed;
-            std::memcpy(&d->results[base], chunk_results.data(),
-                        chunk_results.size() * sizeof(gpu::gather_result_gpu));
             for (gpu::near_pair pair : chunk_near)
             {
                 pair.item += (uint32_t)base;
@@ -669,12 +693,9 @@ namespace rad
                                                          item.cone_power, item.cone_scale,
                                                          &scene.face_gap[(size_t)item.face * 6], add))
                                    {
-                                       gpu::gather_result_gpu &out = d->results[pair.item];
                                        const int compact = d->style_to_compact[l->style];
-                                       out.adds[compact * 3 + 0] += add[0];
-                                       out.adds[compact * 3 + 1] += add[1];
-                                       out.adds[compact * 3 + 2] += add[2];
-                                       out.touched |= 1u << compact;
+                                       const float rgb[3] = {add[0], add[1], add[2]};
+                                       d->results.add_color(pair.item, (uint32_t)compact, rgb);
                                    }
                                }
                            });
@@ -724,7 +745,7 @@ namespace rad
     }
 
     void gpu_gather_intercept(rad_state &, const vec3v &, const byte *, const vec3v &,
-                              vec3v *, byte *, int, int, int)
+                              vec3v *, byte *, int, int, int, int *)
     {
         err::fatal("gpu_gather_intercept called without the gpu backend");
     }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -109,13 +111,64 @@ namespace rad
         };
         static_assert(sizeof(work_item_gpu) == 48, "must match the glsl WorkItem layout");
 
-        struct gather_result_gpu
+        // One mask followed by three float words per active style, as in
+        // gather.comp. A single-style sample occupies 16 bytes.
+        class gather_results
         {
-            float adds[3 * max_compact_styles];
-            uint32_t touched;
-            uint32_t pad0 = 0, pad1 = 0, pad2 = 0;
+        public:
+            static constexpr size_t words_per_item(uint32_t styles)
+            {
+                return 1 + 3 * styles;
+            }
+
+            bool resize(size_t count, uint32_t styles)
+            {
+                if (styles == 0 || styles > max_compact_styles
+                    || count > words.max_size() / words_per_item(styles))
+                    return false;
+                try
+                {
+                    words.resize(count * words_per_item(styles));
+                }
+                catch (const std::bad_alloc &)
+                {
+                    return false;
+                }
+                style_count = styles;
+                return true;
+            }
+
+            uint32_t styles() const { return style_count; }
+            size_t size() const { return words.size() / words_per_item(style_count); }
+            uint32_t *data_at(size_t item) { return words.data() + item * words_per_item(style_count); }
+            uint32_t touched(size_t item) const { return words[item * words_per_item(style_count)]; }
+
+            void read_color(size_t item, uint32_t style, float *rgb) const
+            {
+                std::memcpy(rgb, words.data() + color_offset(item, style), 3 * sizeof(float));
+            }
+
+            void add_color(size_t item, uint32_t style, const float *rgb)
+            {
+                float color[3];
+                read_color(item, style, color);
+                for (int i = 0; i < 3; i++)
+                    color[i] += rgb[i];
+                std::memcpy(words.data() + color_offset(item, style), color, sizeof(color));
+                *data_at(item) |= 1u << style;
+            }
+
+        private:
+            static_assert(sizeof(float) == sizeof(uint32_t), "gather uses 32-bit float words");
+
+            size_t color_offset(size_t item, uint32_t style) const
+            {
+                return item * words_per_item(style_count) + 1 + 3 * style;
+            }
+
+            std::vector<uint32_t> words;
+            uint32_t style_count = 0;
         };
-        static_assert(sizeof(gather_result_gpu) == 208, "must match the glsl GatherResult layout");
 
         // the per map immutable inputs, uploaded once per gather session
         struct gather_scene
@@ -126,6 +179,7 @@ namespace rad
             std::vector<float> sun_normals;  // 4 floats per entry (xyz + weight)
             std::vector<float> sky_normals;  // 4 floats per entry, active sky level only
             std::vector<float> face_gap;     // 6 floats per face (texlightgap axes)
+            uint32_t style_count = 0;
             uint32_t sky_lighting_fix = 0;
             int32_t sky_step_match = 0;
             float indirect_sun = 0;
@@ -154,8 +208,9 @@ namespace rad
                           const std::vector<uint32_t> &pvs_words,
                           uint32_t pvs_stride_words,
                           uint32_t max_chunk_items);
+        // Writes into count preallocated results starting at first_result.
         bool gather_batch(const work_item_gpu *items, size_t count,
-                          std::vector<gather_result_gpu> &results,
+                          gather_results &results, size_t first_result,
                           std::vector<near_pair> &near_pairs);
         void gather_end();
 
@@ -164,7 +219,7 @@ namespace rad
                           const std::vector<work_item_gpu> &items,
                           const std::vector<uint32_t> &pvs_words,
                           uint32_t pvs_stride_words,
-                          std::vector<gather_result_gpu> &results,
+                          gather_results &results,
                           std::vector<near_pair> &near_pairs);
 
         // ===== patch to patch transfer factors =====

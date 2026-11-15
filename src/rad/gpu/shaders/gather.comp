@@ -87,13 +87,6 @@ struct WorkItem
     int pad;
 };
 
-struct GatherResult
-{
-    float adds[3 * MAX_COMPACT_STYLES]; // x0 y0 z0 x1 y1 z1
-    uint touched;
-    uint pad0, pad1, pad2;
-};
-
 layout(std430, set = 0, binding = 1) readonly buffer LightLeafBuffer { LightLeaf lightleafs[]; };
 layout(std430, set = 0, binding = 2) readonly buffer LightBuffer { Light lights[]; };
 layout(std430, set = 0, binding = 3) readonly buffer SunNormalBuffer { float sunNormals[]; };
@@ -102,7 +95,8 @@ layout(std430, set = 0, binding = 4) readonly buffer SkyNormalBuffer { float sky
 layout(std430, set = 0, binding = 5) readonly buffer VisLeafListBuffer { uint visLeafList[]; };
 layout(std430, set = 0, binding = 6) readonly buffer FaceGapBuffer { float faceGap[]; }; // 6 floats per face
 layout(std430, set = 0, binding = 7) readonly buffer WorkItemBuffer { WorkItem items[]; };
-layout(std430, set = 0, binding = 8) writeonly buffer ResultBuffer { GatherResult results[]; };
+// One touched mask, then RGB float bits for each compact style.
+layout(std430, set = 0, binding = 8) writeonly buffer ResultBuffer { uint results[]; };
 layout(std430, set = 0, binding = 9) buffer NearBuffer
 {
     uint nearCount;
@@ -115,7 +109,7 @@ layout(std430, set = 0, binding = 10) readonly buffer VisLeafRangeBuffer { uint 
 layout(push_constant) uniform Params
 {
     uint numItems;
-    uint numLightLeafs;  // unused and kept for layout stability
+    uint numStyles;
     uint skyLightingFix; // optionssky_lighting_fix
     int skyStepMatch;    // 1 when softsky or fastmode, else 0
     float indirectSun;   // optionsindirect_sun
@@ -412,14 +406,12 @@ void main()
         }
     }
 
-    for (int s = 0; s < MAX_COMPACT_STYLES; s++)
+    uint resultBase = idx * (1u + 3u * numStyles);
+    results[resultBase] = touched;
+    for (uint s = 0u; s < numStyles; s++)
     {
-        results[idx].adds[s * 3 + 0] = addsX[s];
-        results[idx].adds[s * 3 + 1] = addsY[s];
-        results[idx].adds[s * 3 + 2] = addsZ[s];
+        results[resultBase + s * 3u + 1u] = floatBitsToUint(addsX[s]);
+        results[resultBase + s * 3u + 2u] = floatBitsToUint(addsY[s]);
+        results[resultBase + s * 3u + 3u] = floatBitsToUint(addsZ[s]);
     }
-    results[idx].touched = touched;
-    results[idx].pad0 = 0u;
-    results[idx].pad1 = 0u;
-    results[idx].pad2 = 0u;
 }

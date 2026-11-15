@@ -777,7 +777,7 @@ namespace rad
     void gpu_gather_begin_face(int facenum);
     void gpu_gather_intercept(rad_state &state, const vec3v &pos, const byte *pvs,
                               const vec3v &normal, vec3v *sample, byte *styles, int step,
-                              int miptex, int texlightgap_surfacenum);
+                              int miptex, int texlightgap_surfacenum, int *cached_pvs_row);
     const vec3v *get_total_light(const patch *pt, int style);
 
     // ===== finalcpp =====

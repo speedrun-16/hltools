@@ -784,7 +784,7 @@ namespace rad
                 VkPipelineLayout pipeline_layout = VK_NULL_HANDLE; // (unowned)
                 uint32_t max_items = 0;
                 uint32_t max_near = 0;
-                uint32_t num_lightleafs = 0;
+                uint32_t style_count = 0;
                 uint32_t sky_lighting_fix = 0;
                 int32_t sky_step_match = 0;
                 float indirect_sun = 0;
@@ -847,6 +847,19 @@ namespace rad
                 g.error = "gather_begin: empty input";
                 return false;
             }
+            if (scene.style_count == 0 || scene.style_count > max_compact_styles)
+            {
+                g.error = "gather_begin: invalid style count";
+                return false;
+            }
+            for (const light_gpu &light : scene.lights)
+            {
+                if (light.compact_style < 0 || (uint32_t)light.compact_style >= scene.style_count)
+                {
+                    g.error = "gather_begin: light style outside result layout";
+                    return false;
+                }
+            }
 
             const int depth = tnode_tree_depth(scene.tnodes);
             if (depth > kernel_trace_stack)
@@ -897,7 +910,7 @@ namespace rad
 
             gsess.max_items = max_chunk_items;
             gsess.max_near = max_chunk_items * 64u + 4096u;
-            gsess.num_lightleafs = (uint32_t)scene.lightleafs.size();
+            gsess.style_count = scene.style_count;
             gsess.sky_lighting_fix = scene.sky_lighting_fix;
             gsess.sky_step_match = scene.sky_step_match;
             gsess.indirect_sun = scene.indirect_sun;
@@ -905,7 +918,8 @@ namespace rad
 
             const VkDeviceSize near_size = 16 + (VkDeviceSize)gsess.max_near * 8;
             const VkDeviceSize results_size =
-                (VkDeviceSize)max_chunk_items * sizeof(gather_result_gpu);
+                (VkDeviceSize)max_chunk_items * gather_results::words_per_item(gsess.style_count)
+                * sizeof(uint32_t);
 
             bool ok = upload(gsess.scene_bufs[0], scene.tnodes.data(),
                              scene.tnodes.size() * sizeof(tnode_gpu))
@@ -996,11 +1010,10 @@ namespace rad
         }
 
         bool gather_batch(const work_item_gpu *items, size_t count,
-                          std::vector<gather_result_gpu> &results,
+                          gather_results &results, size_t first_result,
                           std::vector<near_pair> &near_pairs)
         {
             std::lock_guard<std::mutex> lock(g_mutex);
-            results.clear();
             near_pairs.clear();
             if (!gsess.active)
             {
@@ -1012,6 +1025,12 @@ namespace rad
                 g.error = "gather_batch: bad item count";
                 return false;
             }
+            if (results.styles() != gsess.style_count || first_result > results.size()
+                || count > results.size() - first_result)
+            {
+                g.error = "gather_batch: invalid result range";
+                return false;
+            }
 
             std::memcpy(gsess.item_buf.mapped, items, count * sizeof(work_item_gpu));
             std::memset(gsess.near_buf.mapped, 0, 16); // near pair counter + padding
@@ -1019,7 +1038,7 @@ namespace rad
             struct push_params
             {
                 uint32_t num_items;
-                uint32_t num_lightleafs;
+                uint32_t style_count;
                 uint32_t sky_lighting_fix;
                 int32_t sky_step_match;
                 float indirect_sun;
@@ -1028,7 +1047,7 @@ namespace rad
                 uint32_t num_sky_normals;
             } push = {
                 (uint32_t)count,
-                gsess.num_lightleafs,
+                gsess.style_count,
                 gsess.sky_lighting_fix,
                 gsess.sky_step_match,
                 gsess.indirect_sun,
@@ -1038,7 +1057,9 @@ namespace rad
             };
             static_assert(sizeof(push_params) == 32, "must match the glsl Params block");
 
-            const VkDeviceSize results_size = (VkDeviceSize)count * sizeof(gather_result_gpu);
+            const VkDeviceSize results_size =
+                (VkDeviceSize)count * gather_results::words_per_item(gsess.style_count)
+                * sizeof(uint32_t);
 
             g.fn.ResetCommandPool(g.device, g.command_pool, 0);
             VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1092,8 +1113,7 @@ namespace rad
             std::memcpy(near_pairs.data(), (const unsigned char *)gsess.near_buf.mapped + 16,
                         (size_t)near_count * sizeof(near_pair));
 
-            results.resize(count);
-            std::memcpy(results.data(), gsess.readback_buf.mapped, (size_t)results_size);
+            std::memcpy(results.data_at(first_result), gsess.readback_buf.mapped, (size_t)results_size);
             return true;
         }
 
@@ -1107,12 +1127,19 @@ namespace rad
                           const std::vector<work_item_gpu> &items,
                           const std::vector<uint32_t> &pvs_words,
                           uint32_t pvs_stride_words,
-                          std::vector<gather_result_gpu> &results,
+                          gather_results &results,
                           std::vector<near_pair> &near_pairs)
         {
             if (!gather_begin(scene, pvs_words, pvs_stride_words, (uint32_t)items.size()))
                 return false;
-            const bool ok = gather_batch(items.data(), items.size(), results, near_pairs);
+            if (!results.resize(items.size(), scene.style_count))
+            {
+                gather_end();
+                std::lock_guard<std::mutex> lock(g_mutex);
+                g.error = "gather_batch: could not allocate results";
+                return false;
+            }
+            const bool ok = gather_batch(items.data(), items.size(), results, 0, near_pairs);
             gather_end();
             return ok;
         }

@@ -2433,14 +2433,14 @@ namespace rad
         // that can see it step selects normal (0) or topatch/fast (1) lights
         void gather_sample_light(rad_state &state, const vec3v &pos, const byte *const pvs,
                                  const vec3v &normal, vec3v *sample, byte *styles, int step,
-                                 int miptex, int texlightgap_surfacenum)
+                                 int miptex, int texlightgap_surfacenum, int *cached_pvs_row = nullptr)
         {
             if (state.gpu_gather_phase != 0)
             {
                 // -gpu: collect records this call as a work item; consume
                 // serves the gpu result through the same tail merge
                 gpu_gather_intercept(state, pos, pvs, normal, sample, styles, step,
-                                     miptex, texlightgap_surfacenum);
+                                     miptex, texlightgap_surfacenum, cached_pvs_row);
                 return;
             }
             int i;
@@ -3278,6 +3278,9 @@ namespace rad
             int lastoffset = 0;
             byte pvs2[(limits::max_map_leafs + 7) / 8];
             int lastoffset2 = 0;
+            // Reuse the GPU lookup while each decompressed PVS row stays current.
+            int gpu_pvs_row = -1;
+            int gpu_pvs_row2 = -1;
 
             facenum = l->surfnum;
             memset(l->lmcache, 0, (size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v[allstyles]));
@@ -3406,6 +3409,7 @@ namespace rad
                         int thisoffset = leaf->visofs;
                         if (i == 0 || thisoffset != lastoffset)
                         {
+                            gpu_pvs_row = -1;
                             if (thisoffset == -1)
                             {
                                 memset(pvs, 0, (size_t)((state.map->models[0].visleafs + 7) / 8));
@@ -3432,6 +3436,7 @@ namespace rad
                             int thisoffset2 = leaf2->visofs;
                             if (i == 0 || thisoffset2 != lastoffset2)
                             {
+                                gpu_pvs_row2 = -1;
                                 if (thisoffset2 == -1)
                                 {
                                     memset(pvs2, 0, (size_t)((state.map->models[0].visleafs + 7) / 8));
@@ -3449,7 +3454,8 @@ namespace rad
                 {
                     if (!blocked)
                     {
-                        gather_sample_light(state, spot, pvs, pointnormal, sampled, styles, 0, l->miptex, surface);
+                        gather_sample_light(state, spot, pvs, pointnormal, sampled, styles, 0,
+                                            l->miptex, surface, &gpu_pvs_row);
                     }
                     if (l->translucent_b)
                     {
@@ -3457,7 +3463,8 @@ namespace rad
                         memset(sampled2, 0, allstyles * sizeof(vec3v));
                         if (!blocked)
                         {
-                            gather_sample_light(state, spot2, pvs2, pointnormal2, sampled2, styles, 0, l->miptex, surface);
+                            gather_sample_light(state, spot2, pvs2, pointnormal2, sampled2, styles, 0,
+                                                l->miptex, surface, &gpu_pvs_row2);
                         }
                         for (j = 0; j < allstyles && styles[j] != 255; j++)
                         {

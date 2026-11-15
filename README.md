@@ -476,6 +476,36 @@ Surface lighting:
 | `-texreflectscale <n>` | Texture reflectivity scale; default `0.7` |
 | `-depth <n>` | Translucent light depth; default `2.0` |
 
+#### Ambient occlusion
+
+Enable baked ambient occlusion with `-ao`. RAD traces short rays above the surface and uses their visibility to darken nearby corners and cavities. By default, AO affects ambient and minimum light and lighting delivered through patches. Luxel-level direct lighting keeps its original shadows unless you set `-aodirect`.
+
+```text
+hltools compile -extra -ao maps/example.map
+hltools rad -extra -ao -aodist 64 -aostrength 0.5 maps/example.bsp
+hltools rad -extra -aodebug -aoflat maps/ao-preview.bsp
+```
+
+The debug command replaces the BSP's lightmaps with a visibility preview. Use a copy of the BSP to preserve its baked lighting. `-aoflat` makes the preview grayscale by disabling the albedo-aware correction.
+
+| Option | Effect | Default |
+|---|---|---|
+| `-ao` | Enable ambient occlusion | Off |
+| `-aodist <n>` | Maximum ray distance in map units | `128` |
+| `-aorays <n>` | Rays per sample. With `-extra`, RAD reduces the default per-sample budget because it uses a denser grid | `64` before adjustment |
+| `-aostrength <0..1>` | Overall strength | `1` |
+| `-aofalloff <mode>` | Distance weighting: `binary`, `linear`, `quadratic`, or `smooth` | `linear` |
+| `-aoambient <0..1>` | Strength applied to ambient light and `_minlight` | `1` |
+| `-aobounce <0..1>` | Strength applied to lighting delivered through patches | Automatic from `-aodist` and `-chop` |
+| `-aodirect <0..1>` | Strength applied to luxel-level direct light | `0` |
+| `-aobias <n>` | Move the ray origin along the surface normal to reduce self-occlusion | `0.5` units |
+| `-aoflat` | Disable the albedo-aware multibounce correction | Off |
+| `-aodebug` | Enable AO and bake its visibility into the lightmap for inspection | Off |
+
+#### Soft shadows
+
+Set `_radius` on a `light` or `light_spot` to give it soft shadow edges. Use `-lightradius <n>` as a default for lights without a positive radius and `-softsamples <n>` to control how many shadow rays RAD can use per sample (default `16`). With `-gpu`, RAD gathers direct light on the CPU when any point or spot light needs soft shadows. Eligible scalar transfers still run on the GPU.
+
 Shadows, files and diagnostics:
 
 | Option | Effect |
