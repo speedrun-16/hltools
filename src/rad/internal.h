@@ -385,6 +385,13 @@ namespace rad
     {
         int numsamples;
         sample *samples[maxlightmaps];
+
+        // per luxel ambient occlusion, 0 = fully open and 1 = fully enclosed,
+        // blurred through the same footprint as the light it modulates. empty
+        // unless -ao is on. albedo is the face's own reflectivity, kept here so
+        // the later stages can run the multibounce fit without another lookup
+        std::vector<vec_t> occlusion;
+        vec3v albedo{};
     };
 
     // compact ascending list of leafs that contain at least one direct light,
@@ -716,6 +723,15 @@ namespace rad
     void load_studio_models(rad_state &state);
     void free_studio_models(rad_state &state);
     bool test_segment_against_studio_list(const rad_state &state, const vec3v &p1, const vec3v &p2);
+
+    // ===== ambient occlusion (aocpp) =====
+
+    int ao_rays_for_density(const rad_options &options, int lmcache_density);
+    vec_t ao_sample(const rad_state &state, const vec3v &pos, const vec3v &normal,
+                    unsigned seed, int rays);
+    void ao_visibility(const rad_state &state, vec_t occlusion, const vec3v &albedo,
+                       vec_t strength, vec3v &out);
+    vec_t ao_bounce_strength(const rad_options &options);
 
     // ===== lightmapcpp =====
 

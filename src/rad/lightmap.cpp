@@ -545,6 +545,7 @@ namespace rad
         vec3v (*lmcache)[allstyles]; // lm: short for lightmap
         vec3v *lmcache_normal;       // the phong normals
         int *lmcache_wallflags;      // wallflag values
+        vec_t *lmcache_ao;           // ambient occlusion, null unless -ao
         int lmcachewidth;
         int lmcacheheight;
     };
@@ -668,6 +669,11 @@ namespace rad
                 err::require(l->lmcache_normal != nullptr, "calc_face_extents: out of memory");
                 l->lmcache_wallflags = (int *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(int));
                 err::require(l->lmcache_wallflags != nullptr, "calc_face_extents: out of memory");
+                if (state.options.ao)
+                {
+                    l->lmcache_ao = (vec_t *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec_t));
+                    err::require(l->lmcache_ao != nullptr, "calc_face_extents: out of memory");
+                }
                 l->surfpt_position = (vec3v *)malloc(max_singlemap * sizeof(vec3v));
                 l->surfpt_surface = (int *)malloc(max_singlemap * sizeof(int));
                 err::require(l->surfpt_position != nullptr && l->surfpt_surface != nullptr, "calc_face_extents: out of memory");
@@ -3236,6 +3242,10 @@ namespace rad
             facenum = l->surfnum;
             memset(l->lmcache, 0, (size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v[allstyles]));
 
+            const int ao_rays = l->lmcache_ao
+                ? ao_rays_for_density(state.options, l->lmcache_density)
+                : 0;
+
             // for each sample whose light we need to calculate
             for (i = 0; i < l->lmcachewidth * l->lmcacheheight; i++)
             {
@@ -3417,6 +3427,19 @@ namespace rad
                             }
                         }
                     }
+                    // ambient occlusion is measured here, on the cache grid,
+                    // rather than once per luxel: the cache is what the blur
+                    // footprint below averages, so under -extra the nine
+                    // samples behind a luxel each contribute an independently
+                    // decorrelated estimate and the luxel gets a nine fold
+                    // stratified average for free
+                    if (l->lmcache_ao)
+                    {
+                        l->lmcache_ao[i] = blocked
+                            ? (vec_t)0
+                            : ao_sample(state, spot, pointnormal,
+                                        (unsigned)facenum * 2654435761u + (unsigned)i, ao_rays);
+                    }
                     if (state.options.drawnudge)
                     {
                         for (j = 0; j < allstyles && styles[j] != 255; j++)
@@ -3520,6 +3543,15 @@ namespace rad
         err::require(size <= max_singlemap, "build_facelights: exceeded MAX_SINGLEMAP");
 
         state.facelights[(size_t)facenum].numsamples = l.numsurfpt;
+        if (l.lmcache_ao)
+        {
+            // assign rather than resize: with -gpu build_facelights runs twice
+            // per face and the second pass must not inherit the first's values
+            state.facelights[(size_t)facenum].occlusion.assign((size_t)l.numsurfpt, (vec_t)0);
+            math::copy(state.textures.empty() ? vec3v{}
+                                              : state.textures[(size_t)l.miptex].reflectivity,
+                       state.facelights[(size_t)facenum].albedo);
+        }
 
         for (k = 0; k < allstyles; k++)
         {
@@ -3562,6 +3594,7 @@ namespace rad
             int s_center, t_center;
             vec_t sizehalf;
             vec_t weighting, subsamples;
+            vec_t ao_weighted = 0;
             vec3v centernormal;
             vec_t weighting_correction;
             int pass;
@@ -3569,6 +3602,7 @@ namespace rad
             t_center = (i / lightmapwidth) * l.lmcache_density + l.lmcache_offset;
             sizehalf = (vec_t)(0.5 * state.options.blur * l.lmcache_density);
             subsamples = 0.0;
+            ao_weighted = 0.0;
             math::copy(l.lmcache_normal[s_center + l.lmcachewidth * t_center], centernormal);
             if (state.options.bleedfix && !state.options.drawnudge)
             {
@@ -3668,6 +3702,16 @@ namespace rad
                         {
                             math::multiply_add(fl_samples[j][i].light, weighting, l.lmcache[pos][j], fl_samples[j][i].light);
                         }
+                        // occlusion rides the same footprint as the light. the
+                        // weight already carries weighting_correction, which
+                        // falls off with the normal disagreement between the
+                        // subsample and the luxel centre, so this filter is
+                        // normal aware: it removes the ray noise without
+                        // dragging a corner's darkening out across the edge
+                        if (l.lmcache_ao)
+                        {
+                            ao_weighted += weighting * l.lmcache_ao[pos];
+                        }
                         subsamples += weighting;
                     }
                 }
@@ -3678,6 +3722,7 @@ namespace rad
                 else
                 {
                     subsamples = 0.0;
+                    ao_weighted = 0.0;
                     for (j = 0; j < allstyles && f_styles[j] != 255; j++)
                     {
                         math::clear(fl_samples[j][i].light);
@@ -3689,6 +3734,27 @@ namespace rad
                 for (j = 0; j < allstyles && f_styles[j] != 255; j++)
                 {
                     math::scale(fl_samples[j][i].light, 1.0 / subsamples, fl_samples[j][i].light);
+                }
+                ao_weighted /= subsamples;
+            }
+            if (l.lmcache_ao)
+            {
+                state.facelights[(size_t)facenum].occlusion[(size_t)i] = ao_weighted;
+
+                // direct light is the one term that already has exact per luxel
+                // shadow rays, so ao is kept off it unless it was asked for
+                if (state.options.ao_direct > 0)
+                {
+                    vec3v visibility;
+                    ao_visibility(state, ao_weighted, state.facelights[(size_t)facenum].albedo,
+                                  state.options.ao_direct, visibility);
+                    for (j = 0; j < allstyles && f_styles[j] != 255; j++)
+                    {
+                        for (int x = 0; x < 3; x++)
+                        {
+                            fl_samples[j][i].light[x] *= visibility[x];
+                        }
+                    }
                 }
             }
         } // end of i loop
@@ -3801,9 +3867,23 @@ namespace rad
                 if (f_styles[j] == 0)
                 {
                     s = fl_samples[j];
+                    const facelight *fl_ao = &state.facelights[(size_t)facenum];
                     for (i = 0; i < l.numsurfpt; i++, s++)
                     {
                         vec3v amb{state.options.ambient[0], state.options.ambient[1], state.options.ambient[2]};
+                        // a flat ambient constant is light arriving from every
+                        // direction with no visibility term at all, so this is
+                        // where occlusion belongs most directly
+                        if (l.lmcache_ao && state.options.ao_ambient > 0)
+                        {
+                            vec3v visibility;
+                            ao_visibility(state, fl_ao->occlusion[(size_t)i], fl_ao->albedo,
+                                          state.options.ao_ambient, visibility);
+                            for (int x = 0; x < 3; x++)
+                            {
+                                amb[x] *= visibility[x];
+                            }
+                        }
                         math::add(s->light, amb, s->light);
                     }
                     break;
@@ -4098,6 +4178,7 @@ namespace rad
         free(l.lmcache);
         free(l.lmcache_normal);
         free(l.lmcache_wallflags);
+        free(l.lmcache_ao);
         free(l.surfpt_position);
         free(l.surfpt_surface);
     }

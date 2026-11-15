@@ -290,6 +290,7 @@ target_link_libraries(hltools_bsp PUBLIC hltools_format hltools_math hltools_com
 # rad: radiosity lighting float precision like the reference build (no
 # hltools_double_precision)
 add_library(hltools_rad STATIC
+    src/rad/ao.cpp
     src/rad/compress.cpp
     src/rad/embed_lightmap.cpp
     src/rad/final.cpp

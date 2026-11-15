@@ -121,6 +121,12 @@ namespace rad
             return;
         }
 
+        // radiosity resolves visibility only between patches, so it cannot
+        // darken a corner narrower than -chop. ao measured at luxel resolution
+        // is exactly the part it is missing, ramped down as the occlusion reach
+        // approaches the patch size and the two start describing the same thing
+        const vec_t ao_bounce = state.options.ao ? ao_bounce_strength(state.options) : (vec_t)0;
+
         // the reference built this list by prepending, so iterate in reverse
         const std::vector<int> &items = state.dependentfacelights[(size_t)facenum];
         for (int it = (int)items.size() - 1; it >= 0; it--)
@@ -143,6 +149,17 @@ namespace rad
 
                         int style = f_other->styles[k];
                         interpolate_sample_light(state, samp->pos, samp->surface, 1, &style, &v);
+
+                        if (ao_bounce > 0 && !fl_other->occlusion.empty())
+                        {
+                            vec3v visibility;
+                            ao_visibility(state, fl_other->occlusion[(size_t)i], fl_other->albedo,
+                                          ao_bounce, visibility);
+                            for (int x = 0; x < 3; x++)
+                            {
+                                v[x] *= visibility[x];
+                            }
+                        }
 
                         math::add(samp->light, v, v);
                         if (vector_maximum(v) >= state.corings[f_other->styles[k]])
@@ -282,6 +299,9 @@ namespace rad
                 minlight = (minlight > 255) ? 255 : minlight;
             }
         }
+        const bool ao_enabled = state.options.ao
+            && (int)fl->occlusion.size() == fl->numsamples;
+
         original_basiclight = (vec3v *)calloc((size_t)fl->numsamples, sizeof(vec3v));
         final_basiclight = (int (*)[3])calloc((size_t)fl->numsamples, sizeof(int[3]));
         err::require(original_basiclight != nullptr, "final_light_face: out of memory");
@@ -312,11 +332,27 @@ namespace rad
                 lb[2] *= state.options.colour_lightscale[2];
 
                 // clip from the bottom first
+                //
+                // _minlight is the same kind of quantity as -ambient: a flat
+                // floor standing in for light from everywhere, with no
+                // visibility of its own, so the occlusion applies to the floor
+                // rather than to the value that has already cleared it
+                vec3v minlight_ch{minlight, minlight, minlight};
+                if (ao_enabled && state.options.ao_ambient > 0 && minlight > 0)
+                {
+                    vec3v visibility;
+                    ao_visibility(state, fl->occlusion[(size_t)j], fl->albedo,
+                                  state.options.ao_ambient, visibility);
+                    for (i = 0; i < 3; i++)
+                    {
+                        minlight_ch[i] = minlight * visibility[i];
+                    }
+                }
                 for (i = 0; i < 3; i++)
                 {
-                    if (lb[i] < minlight)
+                    if (lb[i] < minlight_ch[i])
                     {
-                        lb[i] = minlight;
+                        lb[i] = minlight_ch[i];
                     }
                 }
 
@@ -350,6 +386,23 @@ namespace rad
                 for (i = 0; i < 3; ++i)
                     if (lb[i] < state.options.minlight)
                         lb[i] = state.options.minlight;
+                // -aodebug replaces the lightmap with the occlusion itself,
+                // after gamma, the limiter and minlight so the value read off
+                // the wall in game is the one the sampler measured
+                if (state.options.ao_debug && ao_enabled)
+                {
+                    if (k == 0)
+                    {
+                        vec3v visibility;
+                        ao_visibility(state, fl->occlusion[(size_t)j], fl->albedo, 1, visibility);
+                        for (i = 0; i < 3; i++)
+                            lb[i] = visibility[i] * 255;
+                    }
+                    else
+                    {
+                        math::clear(lb);
+                    }
+                }
                 for (i = 0; i < 3; ++i)
                 {
                     lbi[i] = (int)std::floor(lb[i] + 0.5);

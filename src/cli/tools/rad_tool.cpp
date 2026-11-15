@@ -218,6 +218,34 @@ namespace tools
             options.limitthreshold = 188.0f;
         }
 
+        // ambient occlusion
+        options.ao = args.has("-ao") || args.has("-aodebug");
+        if (options.ao)
+        {
+            options.ao_rays_explicit = args.has("-aorays");
+            options.ao_rays = std::max(4, std::min(args.int_value("-aorays", options.ao_rays), 4096));
+            options.ao_dist = (float)std::max(1.0, std::min(args.float_value("-aodist", options.ao_dist), 8192.0));
+            options.ao_strength = (float)std::max(0.0, std::min(args.float_value("-aostrength", options.ao_strength), 1.0));
+            options.ao_direct = (float)std::max(0.0, std::min(args.float_value("-aodirect", options.ao_direct), 1.0));
+            options.ao_ambient = (float)std::max(0.0, std::min(args.float_value("-aoambient", options.ao_ambient), 1.0));
+            options.ao_bounce = (float)std::min(args.float_value("-aobounce", options.ao_bounce), 1.0);
+            options.ao_bias = (float)std::max(0.0, std::min(args.float_value("-aobias", options.ao_bias), 16.0));
+            options.ao_multibounce = !args.has("-aoflat");
+            options.ao_debug = args.has("-aodebug");
+
+            const char *falloff = args.value("-aofalloff", "linear");
+            if (str::iequals(falloff, "binary"))
+                options.ao_falloff_mode = rad::ao_falloff::binary;
+            else if (str::iequals(falloff, "linear"))
+                options.ao_falloff_mode = rad::ao_falloff::linear;
+            else if (str::iequals(falloff, "quadratic"))
+                options.ao_falloff_mode = rad::ao_falloff::quadratic;
+            else if (str::iequals(falloff, "smooth"))
+                options.ao_falloff_mode = rad::ao_falloff::smooth;
+            else
+                err::fatal("invalid value for '-aofalloff': expected binary, linear, quadratic or smooth");
+        }
+
         // repeatable and multi argument flags need a raw scan
         const char *user_lights = nullptr;
         for (int i = 1; i < argc; i++)
@@ -278,6 +306,40 @@ namespace tools
                          options.gpu);
         if (options.gpu)
             logging::setting("gpu device", rad::gpu_device_description().c_str(), "", true);
+        logging::setting("ambient occlusion", options.ao ? "on" : "off", "off", options.ao);
+        if (options.ao)
+        {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%d", rad::ao_rays_effective(options));
+            logging::setting("  ao rays", buf, "64", true);
+            std::snprintf(buf, sizeof(buf), "%.1f", (double)options.ao_dist);
+            logging::setting("  ao distance", buf, "128.0", true);
+            const char *falloff_name = "linear";
+            switch (options.ao_falloff_mode)
+            {
+            case rad::ao_falloff::binary: falloff_name = "binary"; break;
+            case rad::ao_falloff::linear: falloff_name = "linear"; break;
+            case rad::ao_falloff::quadratic: falloff_name = "quadratic"; break;
+            case rad::ao_falloff::smooth: falloff_name = "smooth"; break;
+            }
+            logging::setting("  ao falloff", falloff_name, "linear", true);
+            std::snprintf(buf, sizeof(buf), "%.2f", (double)options.ao_strength);
+            logging::setting("  ao strength", buf, "1.00", true);
+            {
+                char bounce[32];
+                if (options.ao_bounce >= 0)
+                    std::snprintf(bounce, sizeof(bounce), "%.2f", (double)options.ao_bounce);
+                else
+                    std::snprintf(bounce, sizeof(bounce), "auto (%.2f)",
+                                  (double)rad::ao_bounce_effective(options));
+                std::snprintf(buf, sizeof(buf), "%.2f / %.2f / %s", (double)options.ao_direct,
+                              (double)options.ao_ambient, bounce);
+            }
+            logging::setting("  ao direct/ambient/bounce", buf, "0.00 / 1.00 / auto", true);
+            logging::setting("  ao multibounce", options.ao_multibounce ? "on" : "off", "on", true);
+            if (options.ao_debug)
+                logging::setting("  ao debug", "on (lightmap = occlusion)", "off", true);
+        }
 
         // resolve the lightsrad cascade
         {
@@ -353,6 +415,30 @@ namespace tools
                 "  -texreflectgamma <n>  texture reflectivity gamma         (default: 1.76)\n"
                 "  -texreflectscale <n>  texture reflectivity scale         (default: 0.7)\n"
                 "  -depth <n>            translucent light depth            (default: 2.0)\n"
+                "\n"
+                "ambient occlusion\n"
+                "  light gathered per luxel already carries exact shadow rays, so -ao is\n"
+                "  not a shadow term and -aodirect defaults to 0. it supplies the\n"
+                "  visibility the rest of the light is missing, set share by share:\n"
+                "    -aoambient  the flat -ambient and _minlight constants, which carry\n"
+                "                no visibility term of any kind\n"
+                "    -aobounce   everything delivered through patches: bounced light, but\n"
+                "                also texlights and the _fast / light_environment sky,\n"
+                "                whose occlusion is only resolved at patch size (-chop)\n"
+                "    -aodirect   light gathered per luxel, already exactly shadowed\n"
+                "  on a map lit mostly by sky or texlights, -aobounce is the share doing\n"
+                "  the work and -aodirect may have nothing to scale at all.\n"
+                "  -ao                   enable ambient occlusion\n"
+                "  -aorays <n>           rays per sample                    (default: 64)\n"
+                "  -aodist <n>           occlusion reach in units           (default: 128)\n"
+                "  -aofalloff <mode>     binary|linear|quadratic|smooth     (default: linear)\n"
+                "  -aostrength <0..1>    global occlusion multiplier        (default: 1.0)\n"
+                "  -aoambient <0..1>     share applied to ambient/minlight  (default: 1.0)\n"
+                "  -aobounce <0..1>      share applied to bounced light     (default: auto)\n"
+                "  -aodirect <0..1>      share applied to direct light      (default: 0.0)\n"
+                "  -aobias <n>           lift along the normal, vs seam acne(default: 0.5)\n"
+                "  -aoflat               disable albedo-aware multibounce\n"
+                "  -aodebug              bake the occlusion itself into the lightmap\n"
                 "\n"
                 "shadows\n"
                 "  -noopaque             disable opaque entity shadows\n"

@@ -37,6 +37,16 @@ namespace rad
         vector24,
     };
 
+    // how an ambient occlusion ray's contribution decays with the distance to
+    // whatever it hit; binary is the reference behaviour of other compilers
+    enum class ao_falloff
+    {
+        binary = 0, // blocked or not, no grading
+        linear,     // 1 - d/dist
+        quadratic,  // (1 - d/dist)^2
+        smooth,     // 1 - smoothstep(d/dist)
+    };
+
     struct rad_options
     {
         bool fastmode = false;
@@ -89,6 +99,26 @@ namespace rad
 
         bool texscale = true; // scale patches with texture scale
 
+        // ===== ambient occlusion =====
+        //
+        // rad shadows every direct light exactly, so ao is not applied to
+        // direct light by default: doing so darkens the same occlusion twice.
+        // it stands in for the visibility the terms without rays of their own
+        // are missing - the flat ambient and minlight constants, and the
+        // bounced light below patch resolution
+        bool ao = false;
+        int ao_rays = 64;             // cosine distributed rays per sample
+        bool ao_rays_explicit = false; // user set -aorays, don't rescale for -extra
+        float ao_dist = 128.0f;        // occlusion reach in units
+        ao_falloff ao_falloff_mode = ao_falloff::linear;
+        float ao_strength = 1.0f;  // global multiplier on the measured occlusion
+        float ao_direct = 0.0f;    // share applied to direct light (already shadowed)
+        float ao_ambient = 1.0f;   // share applied to -ambient and _minlight
+        float ao_bounce = -1.0f;   // share applied to bounced light; < 0 = auto from chop
+        bool ao_multibounce = true; // albedo aware multibounce instead of a flat multiply
+        float ao_bias = 0.5f;      // extra lift along the phong normal, against seam acne
+        bool ao_debug = false;     // bake occlusion straight into the lightmap
+
         // lighting data memory budget in bytes (-lightdata)
         int max_map_lightdata = 0x3000000;
 
@@ -131,6 +161,12 @@ namespace rad
         bool drawlerp = false;
         bool drawnudge = false;
     };
+
+    // what the ambient occlusion settings actually resolve to, for the settings
+    // table: the ray count one sample fires once -extra has been accounted for,
+    // and the bounce share the auto mode derives from the patch size
+    int ao_rays_effective(const rad_options &options);
+    float ao_bounce_effective(const rad_options &options);
 
     // the gpu the -gpu path will use, for the settings table: the device name,
     // or why the cpu fallback will run instead initializes the device on
