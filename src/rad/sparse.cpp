@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "../common/error.h"
 #include "../common/limits.h"
@@ -10,7 +11,6 @@
 #include "internal.h"
 
 #ifdef HLTOOLS_GPU_ENABLED
-#include <vector>
 #include "gpu/gpu.h"
 #endif
 
@@ -60,77 +60,36 @@ namespace rad
             }
         }
 
-        void set_vis_column(rad_state &state, int patchnum, const char *uncompressedcolumn)
+        void add_visible_patch(std::vector<byte> &bits, unsigned patchnum)
         {
-            sparse_column *column;
-            int mbegin;
-            int m;
-            int i;
-            unsigned int bits;
+            bits[patchnum / 8] |= (byte)(1u << (patchnum & 7));
+        }
 
-            column = &state.sparse_columns[(size_t)patchnum];
+        void set_vis_column(rad_state &state, unsigned patchnum, const std::vector<byte> &bits)
+        {
+            sparse_column *column = &state.sparse_columns[patchnum];
             if (column->count || column->row)
             {
                 err::fatal("set_vis_column: column has been set");
             }
 
-            for (mbegin = 0; mbegin < (int)state.num_patches; mbegin += 8)
+            // The temporary column is already bit-packed. Only emit its
+            // nonempty bytes, starting at the source patch.
+            thread_local std::vector<sparse_row> rows;
+            rows.clear();
+            for (unsigned offset = patchnum / 8; offset < bits.size(); offset++)
             {
-                bits = 0;
-                for (m = mbegin; m < mbegin + 8; m++)
-                {
-                    if (m >= (int)state.num_patches)
-                    {
-                        break;
-                    }
-                    if (uncompressedcolumn[m]) // visible
-                    {
-                        if (m < patchnum)
-                        {
-                            err::fatal("set_vis_column: invalid parameter: m < patchnum");
-                        }
-                        bits |= (1 << (m - mbegin));
-                    }
-                }
-                if (bits)
-                {
-                    column->count++;
-                }
+                if (const byte mask = bits[offset])
+                    rows.push_back({offset, mask});
             }
-
-            if (!column->count)
-            {
+            if (rows.empty())
                 return;
-            }
-            column->row = (sparse_row *)std::malloc((size_t)column->count * sizeof(sparse_row));
-            err::require(column->row != nullptr, "set_vis_column: out of memory");
 
-            i = 0;
-            for (mbegin = 0; mbegin < (int)state.num_patches; mbegin += 8)
-            {
-                bits = 0;
-                for (m = mbegin; m < mbegin + 8; m++)
-                {
-                    if (m >= (int)state.num_patches)
-                    {
-                        break;
-                    }
-                    if (uncompressedcolumn[m]) // visible
-                    {
-                        bits |= (1 << (m - mbegin));
-                    }
-                }
-                if (bits)
-                {
-                    column->row[i].offset = (unsigned)(mbegin / 8);
-                    column->row[i].values = bits;
-                    i++;
-                }
-            }
-            if (i != column->count)
-            {
-                err::fatal("set_vis_column: internal error");
-            }
+            const size_t bytes = rows.size() * sizeof(sparse_row);
+            column->row = (sparse_row *)std::malloc(bytes);
+            err::require(column->row != nullptr, "set_vis_column: out of memory");
+            std::memcpy(column->row, rows.data(), bytes);
+            column->count = (int)rows.size();
         }
 
         bool check_vis_bit_sparse(rad_state &state, unsigned x, unsigned y,
@@ -177,7 +136,7 @@ namespace rad
 
         // sets vis bits for all patches in the face
         void test_patch_to_face(rad_state &state, const unsigned patchnum, const int facenum,
-                                byte *pvs, char *uncompressedcolumn)
+                                const byte *pvs, std::vector<byte> &bits)
         {
             patch *pt = &state.patches[patchnum];
             patch *patch2 = state.face_patches[(size_t)facenum];
@@ -258,14 +217,14 @@ namespace rad
                             {
                                 add_transparency_to_raw_array(state, patchnum, m, transparency);
                             }
-                            uncompressedcolumn[m] = 1;
+                            add_visible_patch(bits, m);
                         }
                     }
                 }
             }
         }
 
-        thread_local std::vector<char> tls_uncompressedcolumn;
+        thread_local std::vector<byte> tls_vis_bits;
 
         // one work item per vis leaf; runs on multiple threads
         void build_vis_leafs_item(rad_state &state, int i,
@@ -311,16 +270,14 @@ namespace rad
                     candidates.push_back((int)face);
             }
 
-            tls_uncompressedcolumn.resize(state.num_patches);
-            char *uncompressedcolumn = tls_uncompressedcolumn.data();
             for (const patch *pt : sources)
             {
                 const unsigned patchnum = (unsigned)(pt - state.patches.data());
-                std::memset(uncompressedcolumn, 0, state.num_patches);
+                tls_vis_bits.assign((state.num_patches + 7) / 8, 0);
                 auto target = std::upper_bound(candidates.begin(), candidates.end(), pt->facenumber);
                 for (; target != candidates.end(); ++target)
-                    test_patch_to_face(state, patchnum, *target, pvs, uncompressedcolumn);
-                set_vis_column(state, (int)patchnum, uncompressedcolumn);
+                    test_patch_to_face(state, patchnum, *target, pvs, tls_vis_bits);
+                set_vis_column(state, patchnum, tls_vis_bits);
             }
         }
 
@@ -529,17 +486,15 @@ namespace rad
                                          || state.map->leafs[(size_t)pt->leafnum].visofs != -1);
                                  if (active)
                                  {
-                                     tls_uncompressedcolumn.resize(state.num_patches);
-                                     char *column = tls_uncompressedcolumn.data();
-                                     std::memset(column, 0, state.num_patches);
+                                     tls_vis_bits.assign((state.num_patches + 7) / 8, 0);
                                      for (size_t s = first[(size_t)k]; s < first[(size_t)k + 1]; s++)
                                      {
                                          if (results[s].contents == contents_empty)
                                          {
-                                             column[targs[(size_t)k][s - first[(size_t)k]]] = 1;
+                                             add_visible_patch(tls_vis_bits, targs[(size_t)k][s - first[(size_t)k]]);
                                          }
                                      }
-                                     set_vis_column(state, (int)patchnum, column);
+                                     set_vis_column(state, patchnum, tls_vis_bits);
                                  }
                                  progress::add(1);
                              });
