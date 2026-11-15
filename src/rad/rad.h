@@ -99,6 +99,18 @@ namespace rad
 
         bool texscale = true; // scale patches with texture scale
 
+        // ===== soft shadows =====
+        //
+        // a light entity is a point, so its shadow terminator is a step. giving
+        // it a radius spreads the shadow ray over the emitter's silhouette and
+        // the penumbra widens with occluder distance, the way the sun's
+        // _spread already works for light_environment
+        //
+        // per light "_radius" wins; this is the default for lights without one,
+        // and 0 keeps the reference's exact hard shadows
+        float light_radius = 0.0f;
+        int soft_samples = 16; // shadow rays per light per sample
+
         // ===== ambient occlusion =====
         //
         // rad shadows every direct light exactly, so ao is not applied to

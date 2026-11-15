@@ -218,6 +218,10 @@ namespace tools
             options.limitthreshold = 188.0f;
         }
 
+        // soft shadows
+        options.light_radius = (float)std::max(0.0, std::min(args.float_value("-lightradius", options.light_radius), 4096.0));
+        options.soft_samples = std::max(1, std::min(args.int_value("-softsamples", options.soft_samples), 1024));
+
         // ambient occlusion
         options.ao = args.has("-ao") || args.has("-aodebug");
         if (options.ao)
@@ -306,6 +310,17 @@ namespace tools
                          options.gpu);
         if (options.gpu)
             logging::setting("gpu device", rad::gpu_device_description().c_str(), "", true);
+        if (options.light_radius > 0)
+        {
+            char sbuf[64];
+            std::snprintf(sbuf, sizeof(sbuf), "%.1f", (double)options.light_radius);
+            logging::setting("light radius default", sbuf, "0.0", true);
+        }
+        {
+            char sbuf[64];
+            std::snprintf(sbuf, sizeof(sbuf), "%d", options.soft_samples);
+            logging::setting("soft shadow samples", sbuf, "16", options.soft_samples != 16);
+        }
         logging::setting("ambient occlusion", options.ao ? "on" : "off", "off", options.ao);
         if (options.ao)
         {
@@ -415,6 +430,16 @@ namespace tools
                 "  -texreflectgamma <n>  texture reflectivity gamma         (default: 1.76)\n"
                 "  -texreflectscale <n>  texture reflectivity scale         (default: 0.7)\n"
                 "  -depth <n>            translucent light depth            (default: 2.0)\n"
+                "\n"
+                "soft shadows\n"
+                "  a light entity is a point, so its shadow terminator is a step. giving it\n"
+                "  a radius spreads the shadow ray over the emitter and the penumbra widens\n"
+                "  with distance from the occluder, the way _spread already works for the\n"
+                "  sun. surface lights (texlights) are already many small emitters and\n"
+                "  soften on their own.\n"
+                "  _radius <n>           per light emitter radius (light, light_spot)\n"
+                "  -lightradius <n>      default radius for lights without _radius (default: 0)\n"
+                "  -softsamples <n>      shadow rays per light per sample     (default: 16)\n"
                 "\n"
                 "ambient occlusion\n"
                 "  light gathered per luxel already carries exact shadow rays, so -ao is\n"

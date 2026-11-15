@@ -1,6 +1,7 @@
 #include <cmath>
 
 #include "internal.h"
+#include "sampling.h"
 
 // ambient occlusion: the fraction of the cosine weighted hemisphere above a
 // sample that is blocked by nearby geometry
@@ -23,50 +24,6 @@ namespace rad
 {
     namespace
     {
-        // r3, the 3 dimensional low discrepancy sequence built from the root of
-        // x^4 = x + 1. it is well stratified at any ray count, which a fixed
-        // grid is not unless the count factorizes, and the first k points of it
-        // are spread well enough to serve as the early out probe below
-        constexpr double r3_alpha1 = 0.81917251339616450;
-        constexpr double r3_alpha2 = 0.67104360670378930;
-        constexpr double r3_alpha3 = 0.54970047790197020;
-
-        // deterministic 32 bit integer hash (murmur style finalizer). the per
-        // sample sequence offsets come from this rather than a running rng so
-        // the same luxel always draws the same rays no matter how faces are
-        // distributed over threads
-        inline unsigned hash_u32(unsigned x)
-        {
-            x ^= x >> 16;
-            x *= 0x7feb352du;
-            x ^= x >> 15;
-            x *= 0x846ca68bu;
-            x ^= x >> 16;
-            return x;
-        }
-
-        inline double hash_unit(unsigned x)
-        {
-            return (double)hash_u32(x) * (1.0 / 4294967296.0);
-        }
-
-        inline double fract(double x)
-        {
-            return x - std::floor(x);
-        }
-
-        // branchless orthonormal basis (duff et al). neighbouring normals get
-        // frames that vary smoothly, so the stratification stays coherent
-        // across a face instead of tumbling from luxel to luxel
-        void build_frame(const vec3v &n, vec3v &tangent, vec3v &bitangent)
-        {
-            const vec_t sign = n[2] >= 0 ? (vec_t)1 : (vec_t)-1;
-            const vec_t a = (vec_t)-1 / (sign + n[2]);
-            const vec_t b = n[0] * n[1] * a;
-            tangent = vec3v{1 + sign * n[0] * n[0] * a, sign * b, -sign * n[0]};
-            bitangent = vec3v{b, sign + n[1] * n[1] * a, -n[1]};
-        }
-
         // the fraction of the maximum distance this ray is allowed to travel
         //
         // grading occlusion by hit distance normally needs a tracer that
@@ -138,7 +95,7 @@ namespace rad
         const rad_options &options = state.options;
 
         vec3v tangent, bitangent;
-        build_frame(normal, tangent, bitangent);
+        sampling::build_frame(normal, tangent, bitangent);
 
         // the ray origin is lifted along the phong normal as well. the sample
         // already sits default_hunt_offset off its own plane, but that is the
@@ -154,9 +111,9 @@ namespace rad
         // every luxel draws the same directions and the error is spatially
         // coherent, which shows up as terracing rather than as noise the
         // existing blur can remove
-        const double du = hash_unit(seed * 0x9e3779b9u + 0x0u);
-        const double dv = hash_unit(seed * 0x9e3779b9u + 0x1u);
-        const double dw = hash_unit(seed * 0x9e3779b9u + 0x2u);
+        const double du = sampling::hash_unit(seed * 0x9e3779b9u + 0x0u);
+        const double dv = sampling::hash_unit(seed * 0x9e3779b9u + 0x1u);
+        const double dw = sampling::hash_unit(seed * 0x9e3779b9u + 0x2u);
 
         // unanimous probe: open sky and sealed cavities are both extremely
         // common and both are decided by the first few well spread rays. only
@@ -169,9 +126,9 @@ namespace rad
 
         for (int i = 0; i < rays; i++)
         {
-            const double u = fract(0.5 + r3_alpha1 * (i + 1) + du);
-            const double v = fract(0.5 + r3_alpha2 * (i + 1) + dv);
-            const double w = fract(0.5 + r3_alpha3 * (i + 1) + dw);
+            const double u = sampling::fract(0.5 + sampling::r3_alpha1 * (i + 1) + du);
+            const double v = sampling::fract(0.5 + sampling::r3_alpha2 * (i + 1) + dv);
+            const double w = sampling::fract(0.5 + sampling::r3_alpha3 * (i + 1) + dw);
 
             // malley: a cosine density on the hemisphere is a uniform density
             // on the disc lifted straight up

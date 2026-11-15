@@ -143,6 +143,11 @@ namespace rad
         vec3v *sunnormals;
         vec_t *sunnormalweights;
 
+        // spherical emitter radius for soft shadows (_radius), 0 = point
+        // source and the exact hard shadow the reference casts. calloc zeroes
+        // it, like every other member here
+        vec_t radius;
+
         vec_t patch_area;
         vec_t patch_emitter_range;
         patch *source_patch;
@@ -723,6 +728,17 @@ namespace rad
     void load_studio_models(rad_state &state);
     void free_studio_models(rad_state &state);
     bool test_segment_against_studio_list(const rad_state &state, const vec3v &p1, const vec3v &p2);
+
+    // ===== soft shadows (soft_shadowcpp) =====
+
+    // the fraction of a spherical emitter of the given radius that pos can see,
+    // with transparency_out averaged over the rays that got through. falls back
+    // to the single reference ray when radius is 0, so a map with no _radius
+    // key lights exactly as it did before
+    vec_t soft_shadow_visibility(const rad_state &state, const vec3v &pos,
+                                 const vec3v &light_origin, vec_t radius, int samples,
+                                 bool shadowtests_active, vec3v &transparency_out,
+                                 int &opaquestyle_out);
 
     // ===== ambient occlusion (aocpp) =====
 

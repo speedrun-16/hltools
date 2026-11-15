@@ -1839,6 +1839,19 @@ namespace rad
                 dl->fade = state.options.fade;
             }
 
+            // soft shadow emitter size. only point and spot lights read it at
+            // gather time; light_environment becomes a skylight below and keeps
+            // using _spread, which already spreads its shadow rays
+            dl->radius = (vec_t)float_for_key(*e, "_radius");
+            if (dl->radius <= 0)
+            {
+                dl->radius = (vec_t)state.options.light_radius;
+            }
+            if (dl->radius < 0)
+            {
+                dl->radius = 0;
+            }
+
             target = e->value("target");
 
             if (!strcmp(name, "light_spot") || !strcmp(name, "light_environment") || target[0])
@@ -2848,20 +2861,47 @@ namespace rad
                                     break;
                                 }
                                 }
-                                if (test_line(state, pos, testline_origin) != contents_empty)
+                                vec3v transparency;
+                                int opaquestyle = -1;
+                                math::copy(vec3_one, transparency);
+
+                                // an emitter with a radius spreads its shadow
+                                // ray over the disc the sample sees, so the
+                                // terminator becomes a gradient instead of a
+                                // step. surface lights are already many small
+                                // patch emitters and soften on their own, and
+                                // skylights have _spread, so only the two point
+                                // shaped types take this path
+                                const bool soft = l->radius > 0
+                                    && (l->type == emit_type::point || l->type == emit_type::spotlight);
+                                if (soft)
                                 {
-                                    continue;
+                                    vec_t visibility = soft_shadow_visibility(
+                                        state, pos, testline_origin, l->radius,
+                                        state.options.soft_samples, shadowtests_active,
+                                        transparency, opaquestyle);
+                                    if (visibility <= 0)
+                                    {
+                                        continue;
+                                    }
+                                    math::scale(add, visibility, add);
+                                }
+                                else
+                                {
+                                    if (test_line(state, pos, testline_origin) != contents_empty)
+                                    {
+                                        continue;
+                                    }
+                                    if (shadowtests_active
+                                        && test_segment_against_opaque_list(state, pos, testline_origin, transparency, opaquestyle))
+                                    {
+                                        continue;
+                                    }
                                 }
                                 // add to the total brightness of this sample
                                 style = l->style;
                                 if (shadowtests_active)
                                 {
-                                    vec3v transparency;
-                                    int opaquestyle;
-                                    if (test_segment_against_opaque_list(state, pos, testline_origin, transparency, opaquestyle))
-                                    {
-                                        continue;
-                                    }
                                     math::multiply(add, transparency, add);
                                     if (opaquestyle != -1)
                                     {

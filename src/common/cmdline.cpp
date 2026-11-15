@@ -108,6 +108,9 @@ namespace cli
             {"-texlightgap", rad, 1, true, false},
             {"-pre25", rad, 0, true, false},
 
+            {"-lightradius", rad, 1, true, false},
+            {"-softsamples", rad, 1, true, false},
+
             {"-ao", rad, 0, true, false},
             {"-aorays", rad, 1, true, false},
             {"-aodist", rad, 1, true, false},
