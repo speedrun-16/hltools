@@ -537,6 +537,7 @@ namespace rad
         // 1 = collect (record work items, produce nothing), 2 = consume
         // (serve the gpu results through the same tail merge)
         int gpu_gather_phase = 0;
+        int gpu_gather_cache_styles = allstyles;
         struct gpu_gather_data *gpu_gather = nullptr;
 
         // faces whose samples grew into a given face (add_patch_lights)

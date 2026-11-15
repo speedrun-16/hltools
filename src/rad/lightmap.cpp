@@ -542,7 +542,8 @@ namespace rad
         int lmcache_density; // shared by both s and t direction
         int lmcache_offset;  // shared by both s and t direction
         int lmcache_side;
-        vec3v (*lmcache)[allstyles]; // lm: short for lightmap
+        int lmcache_styles;          // color slots per cache sample
+        vec3v *lmcache;
         vec3v *lmcache_normal;       // the phong normals
         int *lmcache_wallflags;      // wallflag values
         vec_t *lmcache_ao;           // ambient occlusion, null unless -ao
@@ -560,7 +561,7 @@ namespace rad
         }
 
         // fills in texmins, texsize, exactmins, exactmaxs and the sample cache
-        void calc_face_extents(rad_state &state, lightinfo *l)
+        void calc_face_extents(rad_state &state, lightinfo *l, bool collect_only)
         {
             const int facenum = l->surfnum;
             format::dface_t *s;
@@ -663,16 +664,21 @@ namespace rad
                 l->lmcache_offset = l->lmcache_side;
                 l->lmcachewidth = l->texsize[0] * l->lmcache_density + 1 + 2 * l->lmcache_side;
                 l->lmcacheheight = l->texsize[1] * l->lmcache_density + 1 + 2 * l->lmcache_side;
-                l->lmcache = (vec3v (*)[allstyles])malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v[allstyles]));
-                err::require(l->lmcache != nullptr, "calc_face_extents: out of memory");
-                l->lmcache_normal = (vec3v *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v));
-                err::require(l->lmcache_normal != nullptr, "calc_face_extents: out of memory");
-                l->lmcache_wallflags = (int *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(int));
-                err::require(l->lmcache_wallflags != nullptr, "calc_face_extents: out of memory");
-                if (state.options.ao)
+                if (!collect_only)
                 {
-                    l->lmcache_ao = (vec_t *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec_t));
-                    err::require(l->lmcache_ao != nullptr, "calc_face_extents: out of memory");
+                    l->lmcache_styles = state.gpu_gather_cache_styles;
+                    l->lmcache = (vec3v *)malloc((size_t)l->lmcachewidth * l->lmcacheheight
+                                                  * l->lmcache_styles * sizeof(vec3v));
+                    err::require(l->lmcache != nullptr, "calc_face_extents: out of memory");
+                    l->lmcache_normal = (vec3v *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v));
+                    err::require(l->lmcache_normal != nullptr, "calc_face_extents: out of memory");
+                    l->lmcache_wallflags = (int *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(int));
+                    err::require(l->lmcache_wallflags != nullptr, "calc_face_extents: out of memory");
+                    if (state.options.ao)
+                    {
+                        l->lmcache_ao = (vec_t *)malloc((size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec_t));
+                        err::require(l->lmcache_ao != nullptr, "calc_face_extents: out of memory");
+                    }
                 }
                 l->surfpt_position = (vec3v *)malloc(max_singlemap * sizeof(vec3v));
                 l->surfpt_surface = (int *)malloc(max_singlemap * sizeof(int));
@@ -3270,7 +3276,7 @@ namespace rad
 
     namespace
     {
-        void calc_lightmap(rad_state &state, lightinfo *l, byte *styles)
+        void calc_lightmap(rad_state &state, lightinfo *l, byte *styles, bool collect_only)
         {
             int facenum;
             int i, j;
@@ -3283,7 +3289,9 @@ namespace rad
             int gpu_pvs_row2 = -1;
 
             facenum = l->surfnum;
-            memset(l->lmcache, 0, (size_t)(l->lmcachewidth * l->lmcacheheight) * sizeof(vec3v[allstyles]));
+            if (!collect_only)
+                memset(l->lmcache, 0, (size_t)l->lmcachewidth * l->lmcacheheight
+                                       * l->lmcache_styles * sizeof(vec3v));
 
             const int ao_rays = l->lmcache_ao
                 ? ao_rays_for_density(state.options, l->lmcache_density)
@@ -3307,9 +3315,7 @@ namespace rad
                 vec3v spot2;
                 vec3v pointnormal2;
                 vec3v *sampled;
-                vec3v *normal_out;
                 bool nudged;
-                int *wallflags_out;
 
                 // prepare input parameters and output destinations
                 {
@@ -3325,9 +3331,7 @@ namespace rad
                         nt = nt < l->texsize[1] ? nt : l->texsize[1];
                         nearest_t = 0 > nt ? 0 : nt;
                     }
-                    sampled = l->lmcache[i];
-                    normal_out = &l->lmcache_normal[i];
-                    wallflags_out = &l->lmcache_wallflags[i];
+                    sampled = collect_only ? nullptr : &l->lmcache[(size_t)i * l->lmcache_styles];
 
                     // the range in which a sample point affects lighting extends
                     // lmcache_side luxels around it (see the reference diagram)
@@ -3374,14 +3378,14 @@ namespace rad
                         }
                         math::multiply_add(spot2, -(state.options.translucentdepth + 2 * default_hunt_offset), surfaceplane->normal, spot2);
                     }
-                    *wallflags_out = wallflag_none;
-                    if (blocked)
+                    if (!collect_only)
                     {
-                        *wallflags_out |= (wallflag_blocked | wallflag_nudged);
-                    }
-                    if (nudged)
-                    {
-                        *wallflags_out |= wallflag_nudged;
+                        int &wallflags = l->lmcache_wallflags[i];
+                        wallflags = wallflag_none;
+                        if (blocked)
+                            wallflags |= wallflag_blocked | wallflag_nudged;
+                        if (nudged)
+                            wallflags |= wallflag_nudged;
                     }
                 }
                 // calculate the normal for the sample
@@ -3392,7 +3396,8 @@ namespace rad
                         for (int x = 0; x < 3; x++)
                             pointnormal2[x] = 0.0f - pointnormal[x];
                     }
-                    math::copy(pointnormal, *normal_out);
+                    if (!collect_only)
+                        math::copy(pointnormal, l->lmcache_normal[i]);
                 }
                 // calculate visibility for the sample
                 {
@@ -3466,7 +3471,7 @@ namespace rad
                             gather_sample_light(state, spot2, pvs2, pointnormal2, sampled2, styles, 0,
                                                 l->miptex, surface, &gpu_pvs_row2);
                         }
-                        for (j = 0; j < allstyles && styles[j] != 255; j++)
+                        for (j = 0; !collect_only && j < allstyles && styles[j] != 255; j++)
                         {
                             for (int x = 0; x < 3; x++)
                             {
@@ -3474,6 +3479,9 @@ namespace rad
                             }
                         }
                     }
+                    if (collect_only)
+                        continue;
+
                     // ambient occlusion is measured here, on the cache grid,
                     // rather than once per luxel: the cache is what the blur
                     // footprint below averages, so under -extra the nine
@@ -3510,11 +3518,116 @@ namespace rad
                 }
             }
         }
+
+        void gather_patch_lights(rad_state &state, const lightinfo &l, bool collect_only)
+        {
+            format::map_data &map = *state.map;
+            const int facenum = l.surfnum;
+            patch *first_patch = state.face_patches[(size_t)facenum];
+            byte pvs[(limits::max_map_leafs + 7) / 8];
+            int thisoffset = -1, lastoffset = -1;
+            vec3v spot2, normal2;
+            byte pvs2[(limits::max_map_leafs + 7) / 8];
+            int thisoffset2 = -1, lastoffset2 = -1;
+
+            for (patch *pt = first_patch; pt; pt = pt->next)
+            {
+                // get the pvs for the pos to limit the number of checks
+                if (state.map->visibility.empty())
+                {
+                    memset(pvs, 255, (size_t)((map.models[0].visleafs + 7) / 8));
+                    lastoffset = -1;
+                }
+                else
+                {
+                    format::dleaf_t *leaf = point_in_leaf(state, pt->origin);
+
+                    thisoffset = leaf->visofs;
+                    if (pt == first_patch || thisoffset != lastoffset)
+                    {
+                        if (thisoffset == -1)
+                        {
+                            memset(pvs, 0, (size_t)((map.models[0].visleafs + 7) / 8));
+                        }
+                        else
+                        {
+                            decompress_vis(state, &state.map->visibility[(size_t)leaf->visofs], pvs, sizeof(pvs));
+                        }
+                    }
+                    lastoffset = thisoffset;
+                }
+                if (l.translucent_b)
+                {
+                    if (state.map->visibility.empty())
+                    {
+                        memset(pvs2, 255, (size_t)((map.models[0].visleafs + 7) / 8));
+                        lastoffset2 = -1;
+                    }
+                    else
+                    {
+                        math::multiply_add(pt->origin, -(state.options.translucentdepth + 2 * patch_hunt_offset), l.facenormal, spot2);
+                        format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
+
+                        thisoffset2 = leaf2->visofs;
+                        if (pt == first_patch || thisoffset2 != lastoffset2)
+                        {
+                            if (thisoffset2 == -1)
+                            {
+                                memset(pvs2, 0, (size_t)((map.models[0].visleafs + 7) / 8));
+                            }
+                            else
+                            {
+                                decompress_vis(state, &state.map->visibility[(size_t)leaf2->visofs], pvs2, sizeof(pvs2));
+                            }
+                        }
+                        lastoffset2 = thisoffset2;
+                    }
+                    vec3v frontsampled[allstyles], backsampled[allstyles];
+                    for (int j = 0; j < allstyles; j++)
+                    {
+                        math::clear(frontsampled[j]);
+                        math::clear(backsampled[j]);
+                    }
+                    for (int x = 0; x < 3; x++)
+                        normal2[x] = 0.0f - l.facenormal[x];
+                    gather_sample_light(state, pt->origin, pvs, l.facenormal, frontsampled,
+                                        pt->totalstyle_all, 1, l.miptex, facenum);
+                    gather_sample_light(state, spot2, pvs2, normal2, backsampled,
+                                        pt->totalstyle_all, 1, l.miptex, facenum);
+                    if (collect_only)
+                        continue;
+                    for (int j = 0; j < allstyles && pt->totalstyle_all[j] != 255; j++)
+                    {
+                        for (int x = 0; x < 3; x++)
+                        {
+                            pt->totallight_all[j][x] = (vec_t)(pt->totallight_all[j][x]
+                                + (1.0 - l.translucent_v[x]) * frontsampled[j][x] + l.translucent_v[x] * backsampled[j][x]);
+                        }
+                    }
+                }
+                else
+                {
+                    gather_sample_light(state, pt->origin, pvs, l.facenormal,
+                                        pt->totallight_all, pt->totalstyle_all, 1, l.miptex, facenum);
+                }
+            }
+        }
+
+        void free_face_cache(lightinfo &l)
+        {
+            free(l.lmcache);
+            free(l.lmcache_normal);
+            free(l.lmcache_wallflags);
+            free(l.lmcache_ao);
+            free(l.surfpt_position);
+            free(l.surfpt_surface);
+        }
     }
 
     void build_facelights(rad_state &state, const int facenum)
     {
         format::map_data &map = *state.map;
+        const bool collect_only = state.gpu_gather_phase == 1;
         format::dface_t *f;
         unsigned char f_styles[allstyles];
         sample *fl_samples[allstyles];
@@ -3525,14 +3638,9 @@ namespace rad
         sample *s;
         patch *pt;
         const plane *pl;
-        byte pvs[(limits::max_map_leafs + 7) / 8];
-        int thisoffset = -1, lastoffset = -1;
         int lightmapwidth;
         int lightmapheight;
         int size;
-        vec3v spot2, normal2;
-        byte pvs2[(limits::max_map_leafs + 7) / 8];
-        int thisoffset2 = -1, lastoffset2 = -1;
 
         int *sample_wallflags;
 
@@ -3541,7 +3649,8 @@ namespace rad
         //
         // some surfaces don't need lightmaps
         //
-        f->lightofs = -1;
+        if (!collect_only)
+            f->lightofs = -1;
         for (j = 0; j < allstyles; j++)
         {
             f_styles[j] = 255;
@@ -3549,7 +3658,7 @@ namespace rad
 
         if (map.texinfo[(size_t)f->texinfo].flags & tex_special)
         {
-            for (j = 0; j < maxlightmaps; j++)
+            for (j = 0; !collect_only && j < maxlightmaps; j++)
             {
                 f->styles[j] = 255;
             }
@@ -3579,9 +3688,16 @@ namespace rad
         l.facedist = pl->dist;
 
         calc_face_vectors(state, &l);
-        calc_face_extents(state, &l);
+        calc_face_extents(state, &l, collect_only);
         calc_points(state, &l);
-        calc_lightmap(state, &l, f_styles);
+        calc_lightmap(state, &l, f_styles, collect_only);
+
+        if (collect_only)
+        {
+            gather_patch_lights(state, l, true);
+            free_face_cache(l);
+            return;
+        }
 
         lightmapwidth = l.texsize[0] + 1;
         lightmapheight = l.texsize[1] + 1;
@@ -3592,15 +3708,19 @@ namespace rad
         state.facelights[(size_t)facenum].numsamples = l.numsurfpt;
         if (l.lmcache_ao)
         {
-            // assign rather than resize: with -gpu build_facelights runs twice
-            // per face and the second pass must not inherit the first's values
             state.facelights[(size_t)facenum].occlusion.assign((size_t)l.numsurfpt, (vec_t)0);
             math::copy(state.textures.empty() ? vec3v{}
                                               : state.textures[(size_t)l.miptex].reflectivity,
                        state.facelights[(size_t)facenum].albedo);
         }
 
-        for (k = 0; k < allstyles; k++)
+        const byte *styles_end = std::find(f_styles, f_styles + allstyles, (byte)255);
+        int sample_styles = (int)(styles_end - f_styles);
+        const patch *face_patch = state.face_patches[(size_t)facenum];
+        if (sample_styles < allstyles && face_patch
+            && std::find((const byte *)f_styles, styles_end, face_patch->emitstyle) == styles_end)
+            sample_styles++;
+        for (k = 0; k < sample_styles; k++)
         {
             fl_samples[k] = (sample *)calloc((size_t)l.numsurfpt, sizeof(sample));
             err::require(fl_samples[k] != nullptr, "build_facelights: out of memory");
@@ -3630,7 +3750,7 @@ namespace rad
         {
             const vec3v &spot = l.surfpt[i];
 
-            for (k = 0; k < allstyles; k++)
+            for (k = 0; k < sample_styles; k++)
             {
                 math::copy(spot, fl_samples[k][i].pos);
                 fl_samples[k][i].surface = l.surfpt_surface[i];
@@ -3745,9 +3865,10 @@ namespace rad
                         weighting_correction = math::dot(l.lmcache_normal[pos], centernormal);
                         weighting_correction = (weighting_correction > 0) ? weighting_correction * weighting_correction : 0;
                         weighting = weighting * weighting_correction;
+                        const vec3v *cached = &l.lmcache[(size_t)pos * l.lmcache_styles];
                         for (j = 0; j < allstyles && f_styles[j] != 255; j++)
                         {
-                            math::multiply_add(fl_samples[j][i].light, weighting, l.lmcache[pos][j], fl_samples[j][i].light);
+                            math::multiply_add(fl_samples[j][i].light, weighting, cached[j], fl_samples[j][i].light);
                         }
                         // occlusion rides the same footprint as the light. the
                         // weight already carries weighting_correction, which
@@ -3826,85 +3947,7 @@ namespace rad
                 }
             }
         }
-        for (pt = state.face_patches[(size_t)facenum]; pt; pt = pt->next)
-        {
-            // get the pvs for the pos to limit the number of checks
-            if (state.map->visibility.empty())
-            {
-                memset(pvs, 255, (size_t)((map.models[0].visleafs + 7) / 8));
-                lastoffset = -1;
-            }
-            else
-            {
-                format::dleaf_t *leaf = point_in_leaf(state, pt->origin);
-
-                thisoffset = leaf->visofs;
-                if (pt == state.face_patches[(size_t)facenum] || thisoffset != lastoffset)
-                {
-                    if (thisoffset == -1)
-                    {
-                        memset(pvs, 0, (size_t)((map.models[0].visleafs + 7) / 8));
-                    }
-                    else
-                    {
-                        decompress_vis(state, &state.map->visibility[(size_t)leaf->visofs], pvs, sizeof(pvs));
-                    }
-                }
-                lastoffset = thisoffset;
-            }
-            if (l.translucent_b)
-            {
-                if (state.map->visibility.empty())
-                {
-                    memset(pvs2, 255, (size_t)((map.models[0].visleafs + 7) / 8));
-                    lastoffset2 = -1;
-                }
-                else
-                {
-                    math::multiply_add(pt->origin, -(state.options.translucentdepth + 2 * patch_hunt_offset), l.facenormal, spot2);
-                    format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
-
-                    thisoffset2 = leaf2->visofs;
-                    if (l.numsurfpt == 0 || thisoffset2 != lastoffset2)
-                    {
-                        if (thisoffset2 == -1)
-                        {
-                            memset(pvs2, 0, (size_t)((map.models[0].visleafs + 7) / 8));
-                        }
-                        else
-                        {
-                            decompress_vis(state, &state.map->visibility[(size_t)leaf2->visofs], pvs2, sizeof(pvs2));
-                        }
-                    }
-                    lastoffset2 = thisoffset2;
-                }
-                vec3v frontsampled[allstyles], backsampled[allstyles];
-                for (j = 0; j < allstyles; j++)
-                {
-                    math::clear(frontsampled[j]);
-                    math::clear(backsampled[j]);
-                }
-                for (int x = 0; x < 3; x++)
-                    normal2[x] = 0.0f - l.facenormal[x];
-                gather_sample_light(state, pt->origin, pvs, l.facenormal, frontsampled,
-                                    pt->totalstyle_all, 1, l.miptex, facenum);
-                gather_sample_light(state, spot2, pvs2, normal2, backsampled,
-                                    pt->totalstyle_all, 1, l.miptex, facenum);
-                for (j = 0; j < allstyles && pt->totalstyle_all[j] != 255; j++)
-                {
-                    for (int x = 0; x < 3; x++)
-                    {
-                        pt->totallight_all[j][x] = (vec_t)(pt->totallight_all[j][x]
-                            + (1.0 - l.translucent_v[x]) * frontsampled[j][x] + l.translucent_v[x] * backsampled[j][x]);
-                    }
-                }
-            }
-            else
-            {
-                gather_sample_light(state, pt->origin, pvs, l.facenormal,
-                                    pt->totallight_all, pt->totalstyle_all, 1, l.miptex, facenum);
-            }
-        }
+        gather_patch_lights(state, l, false);
 
         // add an ambient term if desired
         if (state.options.ambient[0] || state.options.ambient[1] || state.options.ambient[2])
@@ -4112,7 +4155,7 @@ namespace rad
                     }
                 }
             }
-            for (j = 0; j < allstyles; j++)
+            for (j = 0; j < sample_styles; j++)
             {
                 free(fl_samples[j]);
             }
@@ -4222,12 +4265,7 @@ namespace rad
             free(pt->directlight_all);
             pt->directlight_all = nullptr;
         }
-        free(l.lmcache);
-        free(l.lmcache_normal);
-        free(l.lmcache_wallflags);
-        free(l.lmcache_ao);
-        free(l.surfpt_position);
-        free(l.surfpt_surface);
+        free_face_cache(l);
     }
 
     // ===== total light lookup =====

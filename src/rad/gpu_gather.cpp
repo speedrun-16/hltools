@@ -7,8 +7,8 @@
 
 // the -gpu direct lighting path the build_facelights phase runs twice: a
 // collect pass where
-// gather_sample_light records every call it would make as a work item (its
-// results are zeroed and the face's side effects reset), then the gpu runs
+// gather_sample_light records each call as a work item without building
+// the lightmap or modifying patches, then the gpu runs
 // the gather kernel over all items (surface near branch pairs resolved on
 // the cpu with the reference functions), then the real pass consumes the
 // stored per style sums through the same coring/style slot tail the cpu
@@ -268,6 +268,9 @@ namespace rad
                 ratio = 0.0;
             }
             get_alternate_origin(state, pos, normal, l->source_patch, testline_origin);
+            if (test_line(state, pos, testline_origin) != contents_empty)
+                return false;
+
             vec_t sightarea;
             int skylevel = l->source_patch->emitter_skylevel;
             if (l->stopdot > 0.0)
@@ -292,40 +295,10 @@ namespace rad
             vec_t ratio2 = (sightarea / l->patch_area);
             ratio = frac * ratio + (1 - frac) * ratio2;
 
-            if (test_line(state, pos, testline_origin) != contents_empty)
-                return false;
             math::scale(l->intensity, ratio, add_out);
             return true;
         }
 
-        // frees the per face side effects the collect run of build_facelights
-        // produced, so the consume run can apply them for real
-        void reset_face(rad_state &state, int facenum)
-        {
-            facelight *fl = &state.facelights[(size_t)facenum];
-            for (int k = 0; k < maxlightmaps; k++)
-            {
-                if (fl->samples[k])
-                {
-                    free(fl->samples[k]);
-                    fl->samples[k] = nullptr;
-                }
-            }
-            for (patch *pt = state.face_patches[(size_t)facenum]; pt; pt = pt->next)
-            {
-                free(pt->totalstyle_all);
-                pt->totalstyle_all = nullptr;
-                free(pt->samplelight_all);
-                pt->samplelight_all = nullptr;
-                free(pt->totallight_all);
-                pt->totallight_all = nullptr;
-                free(pt->directlight_all);
-                pt->directlight_all = nullptr;
-                // add_samples_to_patches accumulates the covered sample area
-                // directly on the patch; the consume run adds it again
-                pt->samples = 0.0;
-            }
-        }
     }
 
     namespace
@@ -503,15 +476,13 @@ namespace rad
             return false;
         }
 
-        // collect pass: run the build_facelights bodies with the gather
-        // intercepted; every face's side effects are reset afterwards
+        // Place samples and record gather calls without building face lights.
         state.gpu_gather_phase = 1;
         threads::run_phase("lighting", "collecting light samples", (int)map.faces.size(),
                            [&](int i)
                            {
                                gpu_gather_begin_face(i);
                                build_facelights(state, i);
-                               reset_face(state, i);
                            });
 
         // flatten face major
@@ -707,6 +678,15 @@ namespace rad
                       gpu::device_name().c_str(), d->items.size(), near_total);
 
         d->face_cursor.assign(map.faces.size(), 0);
+        // Style zero and the face's emitter style can already occupy slots.
+        // Negative coring also admits zero contributions from absent styles.
+        int cache_styles = 2;
+        for (int style = 0; style < allstyles; style++)
+        {
+            if (d->style_to_compact[style] >= 0 || state.corings[style] < 0)
+                cache_styles++;
+        }
+        state.gpu_gather_cache_styles = std::min(cache_styles, allstyles);
         state.gpu_gather_phase = 2;
         return true;
     }
@@ -714,6 +694,7 @@ namespace rad
     void gpu_gather_finish(rad_state &state)
     {
         state.gpu_gather_phase = 0;
+        state.gpu_gather_cache_styles = allstyles;
         delete state.gpu_gather;
         state.gpu_gather = nullptr;
     }

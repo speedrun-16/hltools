@@ -268,48 +268,59 @@ namespace rad
         thread_local std::vector<char> tls_uncompressedcolumn;
 
         // one work item per vis leaf; runs on multiple threads
-        void build_vis_leafs_item(rad_state &state, int i)
+        void build_vis_leafs_item(rad_state &state, int i,
+                                  const std::vector<std::vector<patch *>> &patches_by_leaf,
+                                  const std::vector<int> &unindexed_faces)
         {
-            byte pvs[(limits::max_map_leafs + 7) / 8];
-            format::dleaf_t *srcleaf;
-            patch *pt;
-            unsigned patchnum;
-
-            tls_uncompressedcolumn.resize(state.num_patches);
-            char *uncompressedcolumn = tls_uncompressedcolumn.data();
-
             i++; // skip leaf 0
-            srcleaf = &state.map->leafs[(size_t)i];
+            const std::vector<patch *> &sources = patches_by_leaf[(size_t)i];
+            if (sources.empty())
+                return;
+
+            byte pvs[(limits::max_map_leafs + 7) / 8];
+            const format::dleaf_t &srcleaf = state.map->leafs[(size_t)i];
             if (state.map->visibility.empty())
             {
                 std::memset(pvs, 255, (size_t)((state.map->models[0].visleafs + 7) / 8));
             }
             else
             {
-                if (srcleaf->visofs == -1)
+                if (srcleaf.visofs == -1)
                 {
                     return;
                 }
-                decompress_vis(state, &state.map->visibility[(size_t)srcleaf->visofs], pvs, sizeof(pvs));
+                decompress_vis(state, &state.map->visibility[(size_t)srcleaf.visofs], pvs, sizeof(pvs));
             }
 
-            // go through all the faces inside the leaf, and process the
-            // patches that actually have origins inside
-            for (int facenum = 0; facenum < (int)state.map->faces.size(); facenum++)
+            // Every patch in this source leaf shares its PVS. Cull whole
+            // faces once, then keep the original face and patch order.
+            std::vector<byte> visible_faces(state.map->faces.size(), 0);
+            for (int facenum : unindexed_faces)
+                visible_faces[(size_t)facenum] = 1;
+            for (size_t leaf = 1; leaf < patches_by_leaf.size(); leaf++)
             {
-                for (pt = state.face_patches[(size_t)facenum]; pt; pt = pt->next)
-                {
-                    if (pt->leafnum != i)
-                        continue;
-                    patchnum = (unsigned)(pt - state.patches.data());
-                    for (int m = 0; m < (int)state.num_patches; m++)
-                    {
-                        uncompressedcolumn[m] = 0;
-                    }
-                    for (int facenum2 = facenum + 1; facenum2 < (int)state.map->faces.size(); facenum2++)
-                        test_patch_to_face(state, patchnum, facenum2, pvs, uncompressedcolumn);
-                    set_vis_column(state, (int)patchnum, uncompressedcolumn);
-                }
+                if (!(pvs[(leaf - 1) >> 3] & (1u << ((leaf - 1) & 7))))
+                    continue;
+                for (const patch *target : patches_by_leaf[leaf])
+                    visible_faces[(size_t)target->facenumber] = 1;
+            }
+            std::vector<int> candidates;
+            for (size_t face = 0; face < visible_faces.size(); face++)
+            {
+                if (visible_faces[face])
+                    candidates.push_back((int)face);
+            }
+
+            tls_uncompressedcolumn.resize(state.num_patches);
+            char *uncompressedcolumn = tls_uncompressedcolumn.data();
+            for (const patch *pt : sources)
+            {
+                const unsigned patchnum = (unsigned)(pt - state.patches.data());
+                std::memset(uncompressedcolumn, 0, state.num_patches);
+                auto target = std::upper_bound(candidates.begin(), candidates.end(), pt->facenumber);
+                for (; target != candidates.end(); ++target)
+                    test_patch_to_face(state, patchnum, *target, pvs, uncompressedcolumn);
+                set_vis_column(state, (int)patchnum, uncompressedcolumn);
             }
         }
 
@@ -555,9 +566,23 @@ namespace rad
                 return;
             }
 #endif
-            threads::run_phase("lighting", "building patch visibility",
-                               state.map->models[0].visleafs,
-                               [&](int i) { build_vis_leafs_item(state, i); });
+            const int visleafs = state.map->models[0].visleafs;
+            std::vector<std::vector<patch *>> patches_by_leaf((size_t)visleafs + 1);
+            std::vector<int> unindexed_faces;
+            for (size_t face = 0; face < state.map->faces.size(); face++)
+            {
+                for (patch *pt = state.face_patches[face]; pt; pt = pt->next)
+                {
+                    if (pt->leafnum > 0 && pt->leafnum <= visleafs)
+                        patches_by_leaf[(size_t)pt->leafnum].push_back(pt);
+                    else if (pt->leafnum > visleafs
+                             && (unindexed_faces.empty() || unindexed_faces.back() != (int)face))
+                        unindexed_faces.push_back((int)face);
+                }
+            }
+            threads::run_phase("lighting", "building patch visibility", visleafs, [&](int i) {
+                build_vis_leafs_item(state, i, patches_by_leaf, unindexed_faces);
+            });
         }
 
         void free_vis_matrix(rad_state &state)

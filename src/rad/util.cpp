@@ -952,13 +952,14 @@ namespace rad
         math::copy(normal, clipplane.normal);
         clipplane.dist = math::dot(pos, clipplane.normal);
 
-        math::winding w = *pt->winding;
-        if (w.on_plane_side(clipplane.normal, clipplane.dist) != math::winding::side_cross)
+        const math::winding &winding = *pt->winding;
+        if (winding.on_plane_side(clipplane.normal, clipplane.dist) != math::winding::side_cross)
         {
             math::copy(pt->origin, origin);
         }
         else
         {
+            math::winding w = winding;
             w.clip_in_place(clipplane.normal, clipplane.dist, false);
             if (w.empty())
             {
