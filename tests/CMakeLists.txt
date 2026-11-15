@@ -176,6 +176,12 @@ add_hltools_check(bsp_face_order_check
     LIBRARIES hltools_bsp
     LABELS unit bsp)
 
+add_hltools_check(bsp_warp_range_check
+    NAME unit.bsp.warp_range
+    SOURCES unit/bsp/warp_range.cpp
+    LIBRARIES hltools_bsp
+    LABELS unit bsp)
+
 add_hltools_check(csg_wad_check
     NAME integration.csg.wad
     SOURCES integration/csg/wad.cpp

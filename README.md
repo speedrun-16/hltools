@@ -91,6 +91,21 @@ hltools tests several legal face orders against the same AllocBlock algorithm be
 
 The exact luxel totals identify the textures to fix. Page usage can be slightly higher because atlas packing leaves gaps between rectangles.
 
+## Water and sky beyond ±9999
+
+Legacy GoldSrc GL renderers subdivide water and sky faces using `SubdividePolygon`, which starts its bounds at ±9999. Beyond that range it can pick a split that leaves the polygon unchanged and recurse until the client runs out of stack. Increasing the engine's map coordinate limit alone leaves this renderer limit in place.
+
+The BSP stage conservatively rejects final faces textured with `!*`, `water*` or `sky*` if any vertex lies outside ±9999. Other brushes may go further on engines that allow it. Move the map towards the origin or keep water and sky within range. A failing compile reports the affected faces and their bounds.
+
+```text
+!!! ERROR: WARPED FACES BEYOND +/-9999 - legacy GL subdivision may fail
+    found    340 water / sky faces with vertices outside +/-9999 (sky, !lp_cistern)
+    cause    SubdividePolygon starts its bounds at +/-9999. An invalid split can
+             leave a piece unchanged and overflow the client's stack during load
+    action   move the map towards the origin (centre it) or keep water and sky within
+             +/-9999; other brushes may go further on engines that allow it
+```
+
 ## Embedded map source
 
 `hltools compile` embeds the editable MAP source in the final BSP by default.

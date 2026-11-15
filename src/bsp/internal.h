@@ -314,6 +314,26 @@ namespace bsp
     void write_clip_nodes(bsp_state &state, node *nodes);
     void write_draw_nodes(bsp_state &state, node *headnode);
     void optimize_face_order(bsp_state &state);
+
+    // conservative vertex limit for legacy gl water and sky subdivision.
+    // SubdividePolygon initializes its bounds to +/-9999; outside that range
+    // it can select a split that leaves the polygon unchanged.
+    constexpr float engine_warp_range = 9999.0f;
+
+    struct warped_face_outside_range
+    {
+        int face;
+        int model;
+        std::string texture;
+        float mins[3];
+        float maxs[3];
+    };
+
+    bool texture_is_warped(const char *name);
+    // texinfo_names: the texture name of every texinfo (index = texinfo number)
+    std::vector<warped_face_outside_range> find_warped_faces_outside_range(
+        const format::map_data &map, const std::vector<std::string> &texinfo_names);
+    void check_warped_face_range(const bsp_state &state);
     void finish_bsp_file(bsp_state &state);
 
     // outsidecpp

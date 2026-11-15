@@ -4,9 +4,11 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <numeric>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -923,6 +925,9 @@ namespace bsp
         }
 
         optimize_face_order(state);
+        // after the texinfo remap: only now do the faces' texinfo numbers index map.texinfo.
+        // far out water and sky can fail legacy gl subdivision
+        check_warped_face_range(state);
         write_extent_file(state, state.base_path + ".ext");
 
         // convert the double working planes to the disk format
@@ -937,5 +942,128 @@ namespace bsp
             dp.dist = (float)mp.dist;
             dp.type = mp.type;
         }
+    }
+
+    bool texture_is_warped(const char *name)
+    {
+        // the names the engine draws as warped surfaces (turbulent water and
+        // sky); these are the polygons it runs through SubdividePolygon
+        return name[0] == '!' || str::istarts_with(name, "water") || str::istarts_with(name, "sky");
+    }
+
+    std::vector<warped_face_outside_range> find_warped_faces_outside_range(
+        const format::map_data &map, const std::vector<std::string> &texinfo_names)
+    {
+        std::vector<warped_face_outside_range> found;
+        for (size_t m = 0; m < map.models.size(); m++)
+        {
+            const format::dmodel_t &model = map.models[m];
+            for (int i = model.firstface; i < model.firstface + model.numfaces; i++)
+            {
+                if (i < 0 || i >= (int)map.faces.size())
+                    break;
+                const format::dface_t &face = map.faces[(size_t)i];
+                if (face.texinfo < 0 || (size_t)face.texinfo >= texinfo_names.size()
+                    || !texture_is_warped(texinfo_names[(size_t)face.texinfo].c_str()))
+                    continue;
+
+                warped_face_outside_range hit = {};
+                hit.face = i;
+                hit.model = (int)m;
+                hit.texture = texinfo_names[(size_t)face.texinfo];
+                for (int k = 0; k < 3; k++)
+                {
+                    hit.mins[k] = FLT_MAX;
+                    hit.maxs[k] = -FLT_MAX;
+                }
+                bool outside = false;
+                for (int e = 0; e < face.numedges; e++)
+                {
+                    int surfedge = map.surfedges[(size_t)(face.firstedge + e)];
+                    const format::dedge_t &edge = map.edges[(size_t)(surfedge >= 0 ? surfedge : -surfedge)];
+                    const float *p = map.vertexes[edge.v[surfedge >= 0 ? 0 : 1]].point;
+                    for (int k = 0; k < 3; k++)
+                    {
+                        hit.mins[k] = std::min(hit.mins[k], p[k]);
+                        hit.maxs[k] = std::max(hit.maxs[k], p[k]);
+                        if (p[k] > engine_warp_range || p[k] < -engine_warp_range)
+                            outside = true;
+                    }
+                }
+                if (outside)
+                    found.push_back(std::move(hit));
+            }
+        }
+        return found;
+    }
+
+    namespace
+    {
+        constexpr size_t max_console_warped_faces = 10;
+
+        void report_warped_faces(const std::vector<warped_face_outside_range> &faces, size_t count, bool console)
+        {
+            for (size_t i = 0; i < count; i++)
+            {
+                const warped_face_outside_range &f = faces[i];
+                char line[256];
+                std::snprintf(line, sizeof(line),
+                              "\n    face %d  model %d  %s\n      bounds  (%.3f, %.3f, %.3f) - (%.3f, %.3f, %.3f)\n",
+                              f.face, f.model, f.texture.c_str(), (double)f.mins[0], (double)f.mins[1],
+                              (double)f.mins[2], (double)f.maxs[0], (double)f.maxs[1], (double)f.maxs[2]);
+                if (console)
+                    logging::console("%s", line);
+                else
+                    logging::file("%s", line);
+            }
+        }
+    }
+
+    void check_warped_face_range(const bsp_state &state)
+    {
+        const format::map_data &map = *state.map;
+        std::vector<std::string> names;
+        names.reserve(map.texinfo.size());
+        for (int i = 0; i < (int)map.texinfo.size(); i++)
+            names.emplace_back(texture_by_number(state, i));
+
+        std::vector<warped_face_outside_range> faces = find_warped_faces_outside_range(map, names);
+        if (faces.empty())
+            return;
+
+        std::vector<std::string> textures;
+        for (const warped_face_outside_range &f : faces)
+        {
+            if (std::find(textures.begin(), textures.end(), f.texture) == textures.end())
+                textures.push_back(f.texture);
+        }
+        std::string list;
+        for (size_t i = 0; i < textures.size() && i < 6; i++)
+            list += (i ? ", " : "") + textures[i];
+        if (textures.size() > 6)
+            list += ", ...";
+
+        logging::console("\n!!! ERROR: WARPED FACES BEYOND +/-%.0f - legacy GL subdivision may fail\n",
+                         (double)engine_warp_range);
+        logging::console("    found    %zu water / sky %s with vertices outside +/-%.0f (%s)\n", faces.size(),
+                         faces.size() == 1 ? "face" : "faces", (double)engine_warp_range, list.c_str());
+        logging::console("    cause    SubdividePolygon starts its bounds at +/-%.0f. An invalid split can\n"
+                         "             leave a piece unchanged and overflow the client's stack during load\n",
+                         (double)engine_warp_range);
+        logging::console("    action   move the map towards the origin (centre it) or keep water and sky within\n"
+                         "             +/-%.0f; other brushes may go further on engines that allow it\n",
+                         (double)engine_warp_range);
+
+        size_t console_count = std::min(faces.size(), max_console_warped_faces);
+        report_warped_faces(faces, console_count, true);
+        if (console_count < faces.size())
+            logging::console("\n    (%zu more faces; see the logfile)\n", faces.size() - console_count);
+        logging::console("\n");
+
+        logging::file("\nWarped faces beyond +/-%.0f: %zu water / sky faces exceed the conservative "
+                      "vertex limit for legacy GL subdivision. The client may overflow its stack during load.\n",
+                      (double)engine_warp_range, faces.size());
+        report_warped_faces(faces, faces.size(), false);
+        logging::set_error();
     }
 }
