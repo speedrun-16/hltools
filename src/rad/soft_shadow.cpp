@@ -22,6 +22,27 @@
 
 namespace rad
 {
+    namespace
+    {
+        // the hard shadow of a point source: one ray to the origin
+        vec_t point_visibility(const rad_state &state, const vec3v &pos,
+                               const vec3v &light_origin, bool shadowtests_active,
+                               vec3v &transparency_out, int &opaquestyle_out)
+        {
+            if (test_line(state, pos, light_origin) != contents_empty)
+            {
+                return 0;
+            }
+            if (shadowtests_active
+                && test_segment_against_opaque_list(state, pos, light_origin, transparency_out,
+                                                    opaquestyle_out))
+            {
+                return 0;
+            }
+            return 1;
+        }
+    }
+
     vec_t soft_shadow_visibility(const rad_state &state, const vec3v &pos,
                                  const vec3v &light_origin, vec_t radius, int samples,
                                  bool shadowtests_active, vec3v &transparency_out,
@@ -38,17 +59,8 @@ namespace rad
         // the whole answer and must stay bit for bit what the hard path did
         if (radius <= 0 || samples <= 1 || dist <= radius)
         {
-            if (test_line(state, pos, light_origin) != contents_empty)
-            {
-                return 0;
-            }
-            if (shadowtests_active
-                && test_segment_against_opaque_list(state, pos, light_origin, transparency_out,
-                                                    opaquestyle_out))
-            {
-                return 0;
-            }
-            return 1;
+            return point_visibility(state, pos, light_origin, shadowtests_active,
+                                    transparency_out, opaquestyle_out);
         }
 
         vec3v tangent, bitangent;
@@ -83,6 +95,17 @@ namespace rad
             math::multiply_add(target, (vec_t)(radius * dx), tangent, target);
             math::multiply_add(target, (vec_t)(radius * dy), bitangent, target);
 
+            // the disc ignores the world, so near a wall or a ceiling part of
+            // it lies inside the brush or beyond it. those points are not part
+            // of the emitter at all: counted as blocked rays they would darken
+            // a light that hangs close to a surface even with nothing between
+            // it and the receiver, and counted as visible they would let it
+            // shine through the wall
+            if (test_line(state, light_origin, target) != contents_empty)
+            {
+                continue;
+            }
+
             traced++;
 
             if (test_line(state, pos, target) != contents_empty)
@@ -115,11 +138,23 @@ namespace rad
             }
         }
 
+        // the whole disc is out of reach, which is a light buried in a brush:
+        // the origin is all that is left of it
+        if (traced == 0)
+        {
+            return point_visibility(state, pos, light_origin, shadowtests_active,
+                                    transparency_out, opaquestyle_out);
+        }
         if (visible <= 0)
         {
             return 0;
         }
-        math::scale(transparency_sum, (vec_t)1 / (vec_t)visible, transparency_out);
+        // divided rather than scaled by a reciprocal, so a sum of exact ones
+        // stays exactly one and an unoccluded receiver matches a point light
+        for (int c = 0; c < 3; c++)
+        {
+            transparency_out[c] = transparency_sum[c] / (vec_t)visible;
+        }
         return (vec_t)visible / (vec_t)traced;
     }
 }
