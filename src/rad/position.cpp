@@ -297,6 +297,43 @@ namespace rad
         }
     }
 
+    // the face in its texture space, computed exactly the way chop_frag did
+    // inline: the winding through worldtotex flattened to z = 0 with colinear
+    // points removed, and each edge's ends through worldtotex
+    void build_frag_face(const rad_state &state, int facenum, frag_face &out)
+    {
+        const format::map_data &map = *state.map;
+        const format::dface_t *f = &map.faces[(size_t)facenum];
+        translate_world_to_tex(state, facenum, out.worldtotex);
+        out.flipped = calc_matrix_sign(out.worldtotex) < 0.0;
+        math::winding facewinding = winding_from_face(state, *f);
+        {
+            std::vector<vec3v> pts((size_t)facewinding.size());
+            for (int x = 0; x < facewinding.size(); x++)
+            {
+                apply_matrix(out.worldtotex, facewinding[x], pts[(size_t)x]);
+                pts[(size_t)x][2] = 0.0;
+            }
+            out.texwinding = math::winding{std::move(pts)};
+        }
+        out.texwinding.remove_colinear_points();
+        out.edgetex.resize((size_t)f->numedges * 2);
+        for (int i = 0; i < f->numedges; i++)
+        {
+            const int se = map.surfedges[(size_t)(f->firstedge + i)];
+            const int edgenum = abs(se);
+            const int edgeside = se < 0 ? 1 : 0;
+            const format::dedge_t *de = &map.edges[(size_t)edgenum];
+            const float *dv1 = map.vertexes[de->v[edgeside]].point;
+            const float *dv2 = map.vertexes[de->v[1 - edgeside]].point;
+            vec3v p1{dv1[0], dv1[1], dv1[2]};
+            apply_matrix(out.worldtotex, p1, out.edgetex[(size_t)i * 2]);
+            vec3v p2{dv2[0], dv2[1], dv2[2]};
+            apply_matrix(out.worldtotex, p2, out.edgetex[(size_t)i * 2 + 1]);
+        }
+        out.valid = true;
+    }
+
     void free_position_maps(rad_state &state)
     {
         if (state.options.drawsample)

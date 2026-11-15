@@ -685,8 +685,13 @@ namespace rad
             }
 
             // generate a position map for each face
+            state.frag_faces.assign(map.faces.size(), frag_face{});
             threads::run_phase("lighting", "placing light samples", (int)map.faces.size(),
-                               [&](int i) { find_face_positions(state, i); });
+                               [&](int i)
+                               {
+                                   find_face_positions(state, i);
+                                   build_frag_face(state, i, state.frag_faces[(size_t)i]);
+                               });
 
             // build initial facelights; with -gpu the gather itself runs on
             // the gpu (collect pass + kernel + near pairs) and the phase
@@ -809,6 +814,8 @@ namespace rad
             }
 
             free_position_maps(state);
+            state.frag_faces.clear();
+            state.frag_faces.shrink_to_fit();
 
             // free up the direct lights now that we have facelights
             delete_direct_lights(state);

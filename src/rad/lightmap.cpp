@@ -859,27 +859,26 @@ namespace rad
         {
             // get the shape of the fragment by clipping the face using the boundaries
             const format::dface_t *f;
-            matrix worldtotex;
             const vec3v v_up = {0, 0, 1};
             const format::map_data &map = *state.map;
 
             f = &map.faces[(size_t)frag->facenum];
-            math::winding facewinding = winding_from_face(state, *f);
-
-            translate_world_to_tex(state, frag->facenum, worldtotex);
+            thread_local frag_face local;
+            const frag_face *ff;
+            if ((size_t)frag->facenum < state.frag_faces.size() && state.frag_faces[(size_t)frag->facenum].valid)
             {
-                std::vector<vec3v> pts((size_t)facewinding.size());
-                for (int x = 0; x < facewinding.size(); x++)
-                {
-                    apply_matrix(worldtotex, facewinding[x], pts[(size_t)x]);
-                    pts[(size_t)x][2] = 0.0;
-                }
-                frag->mywinding = new math::winding{std::move(pts)};
+                ff = &state.frag_faces[(size_t)frag->facenum];
             }
-            frag->mywinding->remove_colinear_points();
+            else
+            {
+                build_frag_face(state, frag->facenum, local);
+                ff = &local;
+            }
+
+            frag->mywinding = new math::winding(ff->texwinding);
             // the same as applying the worldtotex matrix to the faceplane
             math::copy(v_up, frag->mywindingplane.normal);
-            if (calc_matrix_sign(worldtotex) < 0.0)
+            if (ff->flipped)
             {
                 frag->mywindingplane.normal[2] *= -1;
             }
@@ -914,11 +913,10 @@ namespace rad
             {
                 samplefragedge *e;
                 const edgeshare *es;
-                const format::dedge_t *de;
                 vec_t frac1, frac2;
                 vec_t edgelen;
                 vec_t dot, dot1, dot2;
-                vec3v tmp, v, normal;
+                vec3v v, normal;
                 const matrix *m;
                 const matrix *m_inverse;
 
@@ -948,19 +946,10 @@ namespace rad
                 // translate the edge points from world to the texture plane of
                 // the original frag, so the distances are comparable among
                 // edges from different frags
-                de = &map.edges[(size_t)e->edgenum];
-                const float *dv1 = map.vertexes[de->v[e->edgeside]].point;
-                const float *dv2 = map.vertexes[de->v[1 - e->edgeside]].point;
-                {
-                    vec3v p1{dv1[0], dv1[1], dv1[2]};
-                    apply_matrix(worldtotex, p1, tmp);
-                    apply_matrix(frag->mycoordtocoord, tmp, e->point1);
-                    e->point1[2] = 0.0;
-                    vec3v p2{dv2[0], dv2[1], dv2[2]};
-                    apply_matrix(worldtotex, p2, tmp);
-                    apply_matrix(frag->mycoordtocoord, tmp, e->point2);
-                    e->point2[2] = 0.0;
-                }
+                apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2], e->point1);
+                e->point1[2] = 0.0;
+                apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2 + 1], e->point2);
+                e->point2[2] = 0.0;
                 math::subtract(e->point2, e->point1, e->direction);
                 edgelen = math::normalize(e->direction);
                 if (edgelen <= math::on_epsilon)
@@ -1099,7 +1088,8 @@ namespace rad
 
             // do the overlap test
             overlap = false;
-            std::vector<plane> clipplanes((size_t)frag->winding->size());
+            thread_local std::vector<plane> clipplanes;
+            clipplanes.resize((size_t)frag->winding->size());
             numclipplanes = 0;
             for (int x = 0; x < frag->winding->size(); x++)
             {
@@ -1115,7 +1105,8 @@ namespace rad
             }
             for (samplefrag *f2 = info->head; f2 && !overlap; f2 = f2->next)
             {
-                math::winding w = *f2->winding;
+                thread_local math::winding w;
+                w = *f2->winding;
                 for (int x = 0; x < numclipplanes && w.size() > 0; x++)
                 {
                     w.clip_in_place(clipplanes[(size_t)x].normal, clipplanes[(size_t)x].dist, false);

@@ -423,6 +423,17 @@ namespace rad
         vec3v pos; // with default_hunt_offset applied
     };
 
+    // a face in its own texture space, everything chop_frag derives from the
+    // face number alone
+    struct frag_face
+    {
+        bool valid = false;
+        matrix worldtotex;
+        bool flipped = false;       // calc_matrix_sign(worldtotex) < 0
+        math::winding texwinding;   // face winding in texture space, z = 0
+        std::vector<vec3v> edgetex; // per face edge: both ends in texture space
+    };
+
     struct position_map
     {
         bool valid = false;
@@ -517,6 +528,10 @@ namespace rad
 
         // sample position grids per face
         std::vector<position_map> face_positions;
+
+        // per face texture plane geometry for sample fragment growth, built
+        // with the position maps (chop_frag recomputed it for every fragment)
+        std::vector<frag_face> frag_faces;
 
         // per face patch triangulations for sample interpolation (lerpcpp)
         std::vector<struct face_triangulation *> facetriangulations;
@@ -638,6 +653,7 @@ namespace rad
     // ===== positioncpp =====
 
     void find_face_positions(rad_state &state, int facenum);
+    void build_frag_face(const rad_state &state, int facenum, frag_face &out);
     void free_position_maps(rad_state &state);
     bool find_nearest_position(const rad_state &state, int facenum, const math::winding *texwinding,
                                const plane &texplane, vec_t s, vec_t t, vec3v &pos,
