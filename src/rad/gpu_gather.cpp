@@ -64,12 +64,12 @@ namespace rad
         // measure each dispatch and steer the next one at a target instead
         // the target is deliberately far under the ~2s reset window: a chunk's
         // cost swings with how many emitters its faces actually see, so the
-        // spread around the average is wide and only the peak matters. an
-        // extra dispatch costs microseconds of submit overhead, while one
-        // overshoot loses the whole gather to the cpu, so we buy the margin
+        // spread around the average is wide. Leave enough margin for a
+        // heavier dispatch so the gather can stay on the GPU.
         constexpr double gather_target_seconds = 0.20;
-        // a dispatch slower than this ratchets the ceiling down for good
+        // Reduce the ceiling immediately after a long dispatch.
         constexpr double gather_ceiling_seconds = 0.40;
+        constexpr unsigned gather_recovery_dispatches = 4;
         constexpr size_t gather_chunk_min = 256;
         constexpr size_t gather_chunk_start = 2048;
 
@@ -549,6 +549,7 @@ namespace rad
         size_t chunk_lo = chunk;
         size_t chunk_hi = chunk;
         size_t chunk_ceiling = gather_chunk_items;
+        unsigned fast_at_ceiling = 0;
         size_t dispatches = 0;
         double spent = 0.0;
         double slowest = 0.0;
@@ -588,16 +589,28 @@ namespace rad
             base += count;
             progress::add((int)count);
 
-            // any dispatch that ran long ratchets the ceiling down and it
-            // never rises again: the average says little here, so the run
-            // has to be paced by the worst chunk seen rather than the last
+            // Reduce the ceiling on a slow dispatch. Recover in steps when
+            // repeated full chunks show enough headroom to grow safely.
             if (elapsed > gather_ceiling_seconds)
             {
                 const double scaled = (double)count * (gather_ceiling_seconds / elapsed);
                 const size_t capped = scaled < (double)gather_chunk_min
                     ? gather_chunk_min : (size_t)scaled;
-                if (capped < chunk_ceiling)
-                    chunk_ceiling = capped;
+                chunk_ceiling = std::min(chunk_ceiling, capped);
+                fast_at_ceiling = 0;
+            }
+            else if (chunk_ceiling < gather_chunk_items && count == chunk_ceiling
+                     && elapsed < gather_target_seconds / 2)
+            {
+                if (++fast_at_ceiling == gather_recovery_dispatches)
+                {
+                    chunk_ceiling = std::min(gather_chunk_items, chunk_ceiling + chunk_ceiling / 2);
+                    fast_at_ceiling = 0;
+                }
+            }
+            else
+            {
+                fast_at_ceiling = 0;
             }
 
             // steer the next chunk at the target. growth is capped at 1.5x a
@@ -611,11 +624,9 @@ namespace rad
                 else if (factor < 0.25)
                     factor = 0.25;
                 const double next = (double)count * factor;
-                const size_t ceiling = chunk_ceiling < gather_chunk_items
-                    ? chunk_ceiling : gather_chunk_items;
                 chunk = next < (double)gather_chunk_min
                     ? gather_chunk_min
-                    : (next > (double)ceiling ? ceiling : (size_t)next);
+                    : (next > (double)chunk_ceiling ? chunk_ceiling : (size_t)next);
                 if (chunk < chunk_lo)
                     chunk_lo = chunk;
                 if (chunk > chunk_hi)
