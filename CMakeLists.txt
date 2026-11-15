@@ -381,6 +381,8 @@ if(HLTOOLS_GPU)
     rad_gpu_kernel(trace_bsp g_trace_bsp_spirv)
     rad_gpu_kernel(gather g_gather_spirv)
     rad_gpu_kernel_src(gather gather_f32 g_gather_f32_spirv -DFLOAT_NORMALIZE)
+    rad_gpu_kernel_src(gather gather_soft g_gather_soft_spirv -DSOFT_SHADOWS)
+    rad_gpu_kernel_src(gather gather_f32_soft g_gather_f32_soft_spirv -DFLOAT_NORMALIZE -DSOFT_SHADOWS)
     rad_gpu_kernel(formfactor g_formfactor_spirv)
 
     add_library(hltools_rad_gpu STATIC
@@ -388,6 +390,8 @@ if(HLTOOLS_GPU)
         ${RAD_GPU_GEN_DIR}/trace_bsp_spirv.h
         ${RAD_GPU_GEN_DIR}/gather_spirv.h
         ${RAD_GPU_GEN_DIR}/gather_f32_spirv.h
+        ${RAD_GPU_GEN_DIR}/gather_soft_spirv.h
+        ${RAD_GPU_GEN_DIR}/gather_f32_soft_spirv.h
         ${RAD_GPU_GEN_DIR}/formfactor_spirv.h
     )
     target_include_directories(hltools_rad_gpu PUBLIC src

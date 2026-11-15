@@ -94,7 +94,7 @@ namespace rad
             float patch_emitter_range;
             float diffuse[3];
             float diffuse2[3];
-            float pad1 = 0;
+            float radius = 0; // soft shadow emitter radius, 0 for a hard shadow
         };
         static_assert(sizeof(light_gpu) == 112, "must match the glsl Light layout");
 
@@ -183,6 +183,9 @@ namespace rad
             uint32_t sky_lighting_fix = 0;
             int32_t sky_step_match = 0;
             float indirect_sun = 0;
+            // shadow rays per soft light (-softsamples); 0 when no light is
+            // soft, which keeps the map on the hard shadow kernel
+            uint32_t soft_samples = 0;
         };
 
         // a (work item, light) pair the kernel routed to the cpu (the surface

@@ -18,6 +18,8 @@
 #include "trace_bsp_spirv.h" // generated: g_trace_bsp_spirv[]
 #include "gather_spirv.h"    // generated: g_gather_spirv[]
 #include "gather_f32_spirv.h" // generated: g_gather_f32_spirv[] (float_normalize)
+#include "gather_soft_spirv.h"     // generated: g_gather_soft_spirv[] (soft_shadows)
+#include "gather_f32_soft_spirv.h" // generated: g_gather_f32_soft_spirv[] (both)
 #include "formfactor_spirv.h" // generated: g_formfactor_spirv[]
 
 // vulkan host plumbing for the gpu lighting backend the loader is opened
@@ -100,15 +102,12 @@ namespace rad
                 VkPipelineLayout trace_pipeline_layout = VK_NULL_HANDLE;
                 VkPipeline trace_pipeline = VK_NULL_HANDLE;
 
-                // cached gather pipeline
-                VkDescriptorSetLayout gather_set_layout = VK_NULL_HANDLE;
-                VkPipelineLayout gather_pipeline_layout = VK_NULL_HANDLE;
-                VkPipeline gather_pipeline = VK_NULL_HANDLE;
-
-                // cached gather pipeline for float normalization without shaderfloat64
-                VkDescriptorSetLayout gather_f32_set_layout = VK_NULL_HANDLE;
-                VkPipelineLayout gather_f32_pipeline_layout = VK_NULL_HANDLE;
-                VkPipeline gather_f32_pipeline = VK_NULL_HANDLE;
+                // cached gather pipelines, one per kernel variant: bit 0 is
+                // float normalization (no shaderfloat64 needed), bit 1 soft
+                // shadows (only built for maps that have a soft light)
+                VkDescriptorSetLayout gather_set_layout[4] = {};
+                VkPipelineLayout gather_pipeline_layout[4] = {};
+                VkPipeline gather_pipeline[4] = {};
 
                 // cached form factor pipeline
                 VkDescriptorSetLayout ff_set_layout = VK_NULL_HANDLE;
@@ -655,30 +654,38 @@ namespace rad
                                                g.trace_pipeline_layout, g.trace_pipeline);
             }
 
-            bool ensure_gather_pipeline_locked(bool float_normalize)
+            int gather_variant(bool float_normalize, bool soft)
             {
-                if (float_normalize)
-                {
-                    if (g.gather_f32_pipeline)
-                        return true;
-                    return ensure_descriptor_pool_locked()
-                        && create_compute_pipeline(g_gather_f32_spirv, g_gather_f32_spirv_size,
-                                                   11, 32, "gather_f32", g.gather_f32_set_layout,
-                                                   g.gather_f32_pipeline_layout,
-                                                   g.gather_f32_pipeline);
-                }
-                if (g.gather_pipeline)
+                return (float_normalize ? 1 : 0) | (soft ? 2 : 0);
+            }
+
+            bool ensure_gather_pipeline_locked(bool float_normalize, bool soft)
+            {
+                const int v = gather_variant(float_normalize, soft);
+                if (g.gather_pipeline[v])
                     return true;
-                if (!g.has_float64)
+                if (!float_normalize && !g.has_float64)
                 {
                     g.error = "the fp64-parity gather kernel (HLTOOLS_GPU_FP64_NORMALIZE=1) "
                               "needs the shaderFloat64 device feature; this device lacks it";
                     return false;
                 }
+                struct kernel
+                {
+                    const void *code;
+                    size_t size;
+                    const char *name;
+                };
+                const kernel kernels[4] = {
+                    {g_gather_spirv, g_gather_spirv_size, "gather"},
+                    {g_gather_f32_spirv, g_gather_f32_spirv_size, "gather_f32"},
+                    {g_gather_soft_spirv, g_gather_soft_spirv_size, "gather_soft"},
+                    {g_gather_f32_soft_spirv, g_gather_f32_soft_spirv_size, "gather_f32_soft"},
+                };
                 return ensure_descriptor_pool_locked()
-                    && create_compute_pipeline(g_gather_spirv, g_gather_spirv_size, 11, 32,
-                                               "gather", g.gather_set_layout,
-                                               g.gather_pipeline_layout, g.gather_pipeline);
+                    && create_compute_pipeline(kernels[v].code, kernels[v].size, 11, 32,
+                                               kernels[v].name, g.gather_set_layout[v],
+                                               g.gather_pipeline_layout[v], g.gather_pipeline[v]);
             }
 
             bool ensure_ff_pipeline_locked()
@@ -873,6 +880,7 @@ namespace rad
                 int32_t sky_step_match = 0;
                 float indirect_sun = 0;
                 uint32_t num_sky_normals = 0;
+                uint32_t soft_samples = 0;
             };
             gather_session gsess;
 
@@ -923,7 +931,8 @@ namespace rad
             // results the environment variable enables fp64 comparison
             const char *fp64_env = std::getenv("HLTOOLS_GPU_FP64_NORMALIZE");
             const bool float_normalize = !(fp64_env && *fp64_env && *fp64_env != '0');
-            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize))
+            const bool soft = scene.soft_samples > 1;
+            if (!ensure_device_locked() || !ensure_gather_pipeline_locked(float_normalize, soft))
                 return false;
             if (max_chunk_items == 0 || scene.tnodes.empty() || scene.lightleafs.empty()
                 || scene.lights.empty() || pvs_words.empty())
@@ -999,6 +1008,7 @@ namespace rad
             gsess.sky_step_match = scene.sky_step_match;
             gsess.indirect_sun = scene.indirect_sun;
             gsess.num_sky_normals = (uint32_t)(scene.sky_normals.size() / 4);
+            gsess.soft_samples = scene.soft_samples;
 
             const VkDeviceSize near_size = 16 + (VkDeviceSize)gsess.max_near * 8;
             const VkDeviceSize results_size =
@@ -1057,13 +1067,13 @@ namespace rad
                 gather_end_locked();
                 return false;
             }
-            gsess.pipeline = float_normalize ? g.gather_f32_pipeline : g.gather_pipeline;
-            gsess.pipeline_layout = float_normalize ? g.gather_f32_pipeline_layout
-                                                    : g.gather_pipeline_layout;
+            const int variant = gather_variant(float_normalize, soft);
+            gsess.pipeline = g.gather_pipeline[variant];
+            gsess.pipeline_layout = g.gather_pipeline_layout[variant];
             VkDescriptorSetAllocateInfo dsai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             dsai.descriptorPool = gsess.pool;
             dsai.descriptorSetCount = 1;
-            dsai.pSetLayouts = float_normalize ? &g.gather_f32_set_layout : &g.gather_set_layout;
+            dsai.pSetLayouts = &g.gather_set_layout[variant];
             if (g.fn.AllocateDescriptorSets(g.device, &dsai, &gsess.set) != VK_SUCCESS)
             {
                 g.error = "gather_begin: descriptor set allocation failed";
@@ -1131,7 +1141,7 @@ namespace rad
                 int32_t sky_step_match;
                 float indirect_sun;
                 uint32_t max_near_pairs;
-                uint32_t pvs_stride_words;
+                uint32_t soft_samples;
                 uint32_t num_sky_normals;
             } push = {
                 (uint32_t)count,
@@ -1140,7 +1150,7 @@ namespace rad
                 gsess.sky_step_match,
                 gsess.indirect_sun,
                 gsess.max_near,
-                0, // pvs stride is unused with visible leaf lists
+                gsess.soft_samples,
                 gsess.num_sky_normals,
             };
             static_assert(sizeof(push_params) == 32, "must match the glsl Params block");

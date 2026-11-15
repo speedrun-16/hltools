@@ -177,6 +177,14 @@ namespace rad
                 out.texlightgap = l.texlightgap;
                 out.patch_area = l.patch_area;
                 out.patch_emitter_range = l.patch_emitter_range;
+                // the same test gather_sample_light makes before it calls
+                // soft_shadow_visibility; every other light keeps radius 0 and
+                // with it the single hard shadow ray
+                const bool soft = state.options.soft_samples > 1 && l.radius > 0
+                    && (l.type == emit_type::point || l.type == emit_type::spotlight);
+                out.radius = soft ? (float)l.radius : 0.0f;
+                if (soft)
+                    scene.soft_samples = (uint32_t)state.options.soft_samples;
             }
 
             const int skylevel = state.options.softsky ? skylevel_softsky_on : skylevel_softsky_off;
@@ -602,16 +610,6 @@ namespace rad
         if (state.lightarray.empty() || map.faces.empty())
         {
             logging::warn("-gpu: no direct lights; using the cpu path");
-            return false;
-        }
-        if (state.options.soft_samples > 1
-            && std::any_of(state.lightarray.begin(), state.lightarray.end(), [](const directlight &light)
-                           {
-                               return light.radius > 0
-                                   && (light.type == emit_type::point || light.type == emit_type::spotlight);
-                           }))
-        {
-            logging::warn("-gpu: soft shadows on point or spot lights; gathering direct light on the cpu");
             return false;
         }
         if (!gpu::available())

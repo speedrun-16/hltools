@@ -15,6 +15,14 @@
 // diffuse sky light surface lights inside their emitter range use sight area
 // blending and alternate origins and are sent to the cpu near pair resolver
 // opaque entities and studio shadows cause the host to use the cpu path
+// point lights and spotlights with a radius trace the emitter disc the way
+// soft_shadow_visibility in src/rad/soft_shadowcpp does (the sequence runs
+// in float here, so a penumbra luxel can differ from the cpu by a ray)
+//
+// soft shadows build as separate variants (soft_shadows defined) that the
+// host only picks for a map with a soft light: the extra branch alone changes
+// how the driver compiles the hard path, which moves luxels by one on maps
+// that have no soft light at all
 // vector normalization uses a float dot with double square root and division
 // which requires shaderfloat64 the lighting cone power path remains float
 //
@@ -72,7 +80,7 @@ struct Light
     float patchEmitterRange;
     float dix, diy, diz;    // diffuse_intensity
     float di2x, di2y, di2z; // diffuse_intensity2
-    float pad1;
+    float radius;           // soft shadow emitter radius, 0 for a hard shadow
 };
 
 struct WorkItem
@@ -114,7 +122,7 @@ layout(push_constant) uniform Params
     int skyStepMatch;    // 1 when softsky or fastmode, else 0
     float indirectSun;   // optionsindirect_sun
     uint maxNearPairs;
-    uint pvsStrideWords; // unused and kept for layout stability
+    uint softSamples;    // shadow rays per soft light (optionssoft_samples)
     uint numSkyNormals;  // of the active sky level
 };
 
@@ -152,6 +160,122 @@ float normalizeExact(inout float dx, inout float dy, inout float dz)
     dy = float(double(dy) / len);
     dz = float(double(dz) / len);
     return float(len);
+}
+#endif
+
+#ifdef SOFT_SHADOWS
+// ---- soft shadows: src/rad/sampling.h and src/rad/soft_shadowcpp ----
+
+const float R2_ALPHA1 = 0.75487766624669276;
+const float R2_ALPHA2 = 0.56984029099805327;
+const float SOFT_PI = 3.14159265358979323846;
+
+uint hashU32(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float hashUnit(uint x)
+{
+    // the top 24 bits, so the float is exact and stays below 1
+    return float(hashU32(x) >> 8) * (1.0 / 16777216.0);
+}
+
+uint hashPosition(float px, float py, float pz)
+{
+    uint h = 0x9e3779b9u;
+    h ^= hashU32(uint(int(floor(px * 16.0)))) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= hashU32(uint(int(floor(py * 16.0)))) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= hashU32(uint(int(floor(pz * 16.0)))) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    return h;
+}
+
+// fraction of the emitter disc the sample sees; the host only sends radius > 0
+// for point lights and spotlights, and never for maps with opaque entities, so
+// the world is the only thing that can block a ray
+float softVisibility(float px, float py, float pz, Light L)
+{
+    float sink1, sink2, sink3;
+    int tf = 0;
+
+    float dx = L.ox - px;
+    float dy = L.oy - py;
+    float dz = L.oz - pz;
+    float dist = sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist <= L.radius || softSamples <= 1u)
+    {
+        return traceLine(px, py, pz, L.ox, L.oy, L.oz, sink1, sink2, sink3, tf)
+                == CONTENTS_EMPTY ? 1.0 : 0.0;
+    }
+    dx /= dist;
+    dy /= dist;
+    dz /= dist;
+
+    // branchless orthonormal basis (duff et al)
+    float sgn = dz >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (sgn + dz);
+    float b = dx * dy * a;
+    float tx = 1.0 + sgn * dx * dx * a, ty = sgn * b, tz = -sgn * dx;
+    float bx = b, by = sgn + dy * dy * a, bz = -dy;
+
+    uint seed = hashPosition(px, py, pz);
+    float du = hashUnit(seed + 0u);
+    float dv = hashUnit(seed + 1u);
+
+    int visible = 0;
+    int traced = 0;
+    for (uint i = 0u; i < softSamples; i++)
+    {
+        // r2 offsets reduced mod 1 before the shift keeps float precision at
+        // any sample count
+        float u = fract(0.5 + fract(R2_ALPHA1 * float(i + 1u)) + du);
+        float v = fract(0.5 + fract(R2_ALPHA2 * float(i + 1u)) + dv);
+
+        // shirley's concentric map
+        float ca = 2.0 * u - 1.0;
+        float cb = 2.0 * v - 1.0;
+        float ox = 0.0, oy = 0.0;
+        if (ca != 0.0 || cb != 0.0)
+        {
+            float r, theta;
+            if (abs(ca) > abs(cb))
+            {
+                r = ca;
+                theta = (SOFT_PI / 4.0) * (cb / ca);
+            }
+            else
+            {
+                r = cb;
+                theta = (SOFT_PI / 2.0) - (SOFT_PI / 4.0) * (ca / cb);
+            }
+            ox = r * cos(theta);
+            oy = r * sin(theta);
+        }
+
+        float ex = L.ox + L.radius * ox * tx + L.radius * oy * bx;
+        float ey = L.oy + L.radius * ox * ty + L.radius * oy * by;
+        float ez = L.oz + L.radius * ox * tz + L.radius * oy * bz;
+
+        // a disc point the light itself cannot reach is inside or beyond a
+        // brush and not part of the emitter
+        if (traceLine(L.ox, L.oy, L.oz, ex, ey, ez, sink1, sink2, sink3, tf) != CONTENTS_EMPTY)
+            continue;
+        traced++;
+        if (traceLine(px, py, pz, ex, ey, ez, sink1, sink2, sink3, tf) == CONTENTS_EMPTY)
+            visible++;
+    }
+
+    if (traced == 0)
+    {
+        return traceLine(px, py, pz, L.ox, L.oy, L.oz, sink1, sink2, sink3, tf)
+                == CONTENTS_EMPTY ? 1.0 : 0.0;
+    }
+    return float(visible) / float(traced);
 }
 #endif
 
@@ -392,6 +516,21 @@ void main()
                 addY = L.iy * ratio;
                 addZ = L.iz * ratio;
             }
+
+#ifdef SOFT_SHADOWS
+            if (L.radius > 0.0)
+            {
+                float visibility = softVisibility(item.px, item.py, item.pz, L);
+                if (visibility <= 0.0)
+                    continue;
+                int ss = L.compactStyle;
+                addsX[ss] += addX * visibility;
+                addsY[ss] += addY * visibility;
+                addsZ[ss] += addZ * visibility;
+                touched |= 1u << uint(ss);
+                continue;
+            }
+#endif
 
             int tf = 0;
             if (traceLine(item.px, item.py, item.pz, L.ox, L.oy, L.oz,

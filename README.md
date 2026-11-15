@@ -517,7 +517,7 @@ The `ao_room` fixture from `tests/fixtures/generators/lighting.py`, compiled wit
 
 #### Soft shadows
 
-Set `_radius` on a `light` or `light_spot` to give it soft shadow edges. Use `-lightradius <n>` as a default for lights without a positive radius and `-softsamples <n>` to control how many shadow rays RAD can use per sample (default `16`). With `-gpu`, RAD gathers direct light on the CPU when any point or spot light needs soft shadows. Eligible scalar transfers still run on the GPU.
+Set `_radius` on a `light` or `light_spot` to give it soft shadow edges. Use `-lightradius <n>` as a default for lights without a positive radius and `-softsamples <n>` to control how many shadow rays RAD can use per sample (default `16`).
 
 Shadows, files and diagnostics:
 
