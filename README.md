@@ -36,22 +36,27 @@ The CPU compiler stages preserve reference compiler behavior across real maps an
 GPU accelerated RAD is one of the largest additions. \
 With `-gpu`, Vulkan compute handles direct light gathering and transfer form factors, significantly reducing lighting and total compile times on supported maps. Unsupported maps automatically use the CPU path.
 
-Measured on `speedrun_celerior` from the same snapshot after CSG, BSP and VIS, using a Release build with `-extra -threads 12` on a Ryzen 5 5600H and an RTX 3050 Laptop GPU. Both values average two alternating runs.
+Measured on `speedrun_celerior` using a Release build on a Ryzen 5 5600H and an RTX 3050 Laptop GPU:
+
+- **RAD only:** `hltools rad -extra -threads 12 -bounce 12` on the same snapshot after CSG, BSP and VIS, averaging three runs with the order reversed in the second pair.
+- **Full compile:** `hltools compile -extra -bounce 12` from the MAP (CSG, BSP, VIS and RAD) with the default thread count, 12 on this CPU, averaging three runs.
 
 ```mermaid
 xychart-beta
-    title "speedrun_celerior RAD compile time (lower is better)"
-    x-axis ["CPU", "-gpu"]
-    y-axis "Wall time (seconds)" 0 --> 120
-    bar [115.533, 39.041]
+    title "speedrun_celerior compile time (lower is better)"
+    x-axis ["RAD CPU", "RAD -gpu", "Compile CPU", "Compile -gpu"]
+    y-axis "Wall time (seconds)" 0 --> 140
+    bar [120.79, 19.02, 136.79, 31.65]
 ```
 
-| Path | Run 1 | Run 2 | Average |
-|---|---:|---:|---:|
-| CPU | 115.518 s | 115.547 s | 115.533 s |
-| `-gpu` | 39.447 s | 38.635 s | 39.041 s |
+| Stage | Path | Run 1 | Run 2 | Run 3 | Average |
+|---|---|---:|---:|---:|---:|
+| RAD only | CPU | 116.92 s | 122.32 s | 123.13 s | 120.79 s |
+| RAD only | `-gpu` | 19.34 s | 18.53 s | 19.18 s | 19.02 s |
+| Full compile | CPU | 138.43 s | 136.88 s | 135.06 s | 136.79 s |
+| Full compile | `-gpu` | 31.00 s | 31.63 s | 32.33 s | 31.65 s |
 
-On this map, `-gpu` is 2.96x faster and reduces RAD wall time by 66.2%.
+On this map, `-gpu` is 6.35× faster and reduces RAD wall time by 84.3%, and it is 4.32× faster for the full compile, reducing its wall time by 76.9%.
 
 ## Leak diagnostics
 
@@ -487,6 +492,14 @@ hltools rad -extra -aodebug -aoflat maps/ao-preview.bsp
 ```
 
 The debug command replaces the BSP's lightmaps with a visibility preview. Use a copy of the BSP to preserve its baked lighting. `-aoflat` makes the preview grayscale by disabling the albedo-aware correction.
+
+The `ao_room` fixture from `tests/fixtures/generators/lighting.py`, compiled with `-extra -ambient 0.18 0.18 0.18`, without and with `-ao`, and with `-aodebug`:
+
+| Without `-ao` | With `-ao` |
+|---|---|
+| ![ao_room without -ao](.github/assets/ao-room-off.png) | ![ao_room with -ao](.github/assets/ao-room-on.png) |
+
+![ao_room with -aodebug](.github/assets/ao-room-debug.png)
 
 | Option | Effect | Default |
 |---|---|---|
