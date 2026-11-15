@@ -710,9 +710,11 @@ namespace rad
             // from a one shot transposed pass outer x ascends, keeping every
             // list in the ascending order the cpu loop walks
             std::vector<std::vector<unsigned>> below(state.num_patches);
+            std::vector<unsigned> above_count(state.num_patches);
             for (unsigned x = 0; x < state.num_patches; x++)
             {
                 const sparse_column &column = state.sparse_columns[x];
+                unsigned count = 0;
                 for (int r = 0; r < column.count; r++)
                 {
                     const unsigned bits = column.row[r].values;
@@ -720,26 +722,40 @@ namespace rad
                     for (unsigned b = 0; b < 8; b++)
                     {
                         if (bits & (1u << b))
+                        {
                             below[ybase + b].push_back(x);
+                            count++;
+                        }
                     }
                 }
+                above_count[x] = count;
             }
 
             constexpr unsigned chunk_patches = 4096;
-            std::vector<std::vector<unsigned>> vis(chunk_patches);
+            std::vector<gpu::transfer_pair> pairs;
+            std::vector<size_t> first(chunk_patches + 1);
+            std::vector<float> trans;
 
             for (unsigned base = 0; base < state.num_patches; base += chunk_patches)
             {
                 const unsigned count = state.num_patches - base < chunk_patches
                     ? state.num_patches - base : chunk_patches;
 
-                // pass a (cpu, threaded): the visible pair lists, in the same
-                // ascending order the cpu loop walks
+                // Give each worker its receiver's slice of the dispatch
+                // buffer. Lower emitters precede the ascending sparse rows.
+                for (unsigned k = 0; k < count; k++)
+                {
+                    const unsigned i = base + k;
+                    first[k + 1] = first[k] + below[i].size() + above_count[i];
+                }
+                pairs.resize(first[count]);
                 threads::run((int)count, [&](int k)
                              {
-                                 vis[(size_t)k].clear();
                                  const unsigned i = base + (unsigned)k;
-                                 vis[(size_t)k] = below[i];
+                                 size_t next = first[(size_t)k];
+                                 for (unsigned j : below[i])
+                                     pairs[next++] = {(int32_t)i, (int32_t)j};
+
                                  const sparse_column &column = state.sparse_columns[i];
                                  for (int r = 0; r < column.count; r++)
                                  {
@@ -748,22 +764,12 @@ namespace rad
                                      for (unsigned b = 0; b < 8; b++)
                                      {
                                          if (bits & (1u << b))
-                                             vis[(size_t)k].push_back(ybase + b);
+                                             pairs[next++] = {(int32_t)i, (int32_t)(ybase + b)};
                                      }
                                  }
                              });
 
                 // pass b (gpu): one transfer factor per pair
-                std::vector<gpu::transfer_pair> pairs;
-                std::vector<size_t> first((size_t)count + 1, 0);
-                for (unsigned k = 0; k < count; k++)
-                {
-                    first[k] = pairs.size();
-                    for (unsigned j : vis[k])
-                        pairs.push_back({(int32_t)(base + k), (int32_t)j});
-                }
-                first[count] = pairs.size();
-                std::vector<float> trans;
                 if (!pairs.empty() && !gpu::formfactor_batch(scene, pairs, trans))
                 {
                     progress::end();
@@ -798,7 +804,7 @@ namespace rad
                                  for (size_t s = first[(size_t)k]; s < first[(size_t)k + 1]; s++)
                                  {
                                      float t = trans[s];
-                                     unsigned j = vis[(size_t)k][s - first[(size_t)k]];
+                                     unsigned j = (unsigned)pairs[s].emitter;
                                      if (std::isnan(t))
                                      {
                                          t = gpu_transfer_fallback(state, pt, &state.patches[(size_t)j],
