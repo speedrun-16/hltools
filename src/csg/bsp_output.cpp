@@ -8,6 +8,7 @@
 #include "../common/error.h"
 #include "../common/filesystem.h"
 #include "../common/string_util.h"
+#include "../common/threads.h"
 #include "format/bsp/entity_lump.h"
 #include "entity_output_fixups.h"
 
@@ -760,12 +761,16 @@ namespace csg
                                               const brush_build_options &options)
     {
         intermediate_data data;
+        // validate in hull order so the first error reported is unchanged,
+        // then carve the four hulls concurrently: each reads the csg result
+        // only and writes its own text
         for (int hull = 0; hull < num_hulls; hull++)
-        {
             validate_detail_brushes(result, hull);
-            data.surfaces[hull] = hull_surface_file(result, hull);
-            data.brushes[hull] = hull_detail_file(result, hull);
-        }
+        threads::run(num_hulls, [&](int hull)
+                     {
+                         data.surfaces[hull] = hull_surface_file(result, hull);
+                         data.brushes[hull] = hull_detail_file(result, hull);
+                     });
 
         for (int hull = 0; hull < num_hulls; hull++)
         {

@@ -9,6 +9,7 @@
 #include "../common/error.h"
 #include "../common/limits.h"
 #include "../common/log.h"
+#include "../common/threads.h"
 
 // the brink pass: rebuilds each model's clip hulls as an exact cell complex,
 // finds convex "brink" edges a player can catch on, and inserts partition
@@ -998,25 +999,35 @@ namespace bsp
             return c;
         }
 
+        // nodes the expansion of headnode produces (merged clipnodes can be
+        // shared, so this is the expanded tree, not the lump size); stops
+        // counting once past the limit so a pathological dag cannot explode
+        int count_expanded_clipnodes(const format::dclipnode_t *clipnodes, int headnode, int count)
+        {
+            if (count > max_expanded_clipnodes)
+                return count;
+            count++;
+            if (headnode >= 0)
+            {
+                for (int k = 0; k < 2; k++)
+                    count = count_expanded_clipnodes(clipnodes, clipnodes[headnode].children[k], count);
+            }
+            return count;
+        }
+
         void expand_clipnodes(const bsp_state &state, bbrinkinfo *info,
                               const format::dclipnode_t *clipnodes, int headnode)
         {
-            std::vector<bclipnode> temp((size_t)max_expanded_clipnodes);
+            // expand straight into an exactly sized array: the old scratch
+            // buffer value initialized max_expanded_clipnodes nodes (several
+            // MB) for every model hull just to copy out the few it used.
+            // same preorder layout, and the same failure past the limit
+            const int count = count_expanded_clipnodes(clipnodes, headnode, 0);
+            if (count > max_expanded_clipnodes)
+                err::fatal("expand_clipnodes_r: exceeded max_expanded_clipnodes");
+            info->clipnodes = new bclipnode[(size_t)count];
             info->numclipnodes = 0;
-            expand_clipnodes_r(state, temp.data(), info->numclipnodes, clipnodes, headnode);
-            info->clipnodes = new bclipnode[(size_t)info->numclipnodes];
-            for (int i = 0; i < info->numclipnodes; i++)
-            {
-                info->clipnodes[i] = temp[(size_t)i];
-                for (int k = 0; k < 2; k++)
-                {
-                    if (!temp[(size_t)i].isleaf)
-                    {
-                        info->clipnodes[i].children[k] =
-                            info->clipnodes + (temp[(size_t)i].children[k] - temp.data());
-                    }
-                }
-            }
+            expand_clipnodes_r(state, info->clipnodes, info->numclipnodes, clipnodes, headnode);
         }
 
         void build_tree_cells(bbrinkinfo *info)
@@ -1627,15 +1638,18 @@ namespace bsp
         std::vector<bbrinkinfo *> brinkinfo((size_t)nummodels * num_hulls, nullptr);
         std::vector<int> headnode((size_t)nummodels * num_hulls, 0);
 
-        for (int i = 0; i < nummodels; i++)
-        {
-            format::dmodel_t *m = &map.models[(size_t)i];
-            for (int j = 1; j < num_hulls; j++)
-            {
-                brinkinfo[(size_t)(i * num_hulls + j)] =
-                    create_brinkinfo(state, map.clipnodes.data(), m->headnode[j]);
-            }
-        }
+        // each model hull is analyzed independently from the read only
+        // clipnode lump; the world's hulls are the expensive ones and come
+        // first in this order, so they start first
+        const int clip_hulls = num_hulls - 1;
+        threads::run(nummodels * clip_hulls, [&](int item)
+                     {
+                         const int i = item / clip_hulls;
+                         const int j = 1 + item % clip_hulls;
+                         const format::dmodel_t *m = &map.models[(size_t)i];
+                         brinkinfo[(size_t)(i * num_hulls + j)] =
+                             create_brinkinfo(state, map.clipnodes.data(), m->headnode[j]);
+                     });
 
         fix_context ctx;
         ctx.noclipnodemerge = state.options.noclipnodemerge;

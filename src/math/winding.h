@@ -281,8 +281,22 @@ namespace math
         bool clip_in_place(const vec3<T> &normal, T dist, bool keepon)
         {
             int n = size();
-            std::vector<T> dists((size_t)n + 1);
-            std::vector<int> sides((size_t)n + 1);
+            // rad clips once per lightmap sample fragment; keep the per call
+            // classification off the heap for the usual small windings
+            constexpr int stack_points = 64;
+            T dists_stack[stack_points + 1];
+            int sides_stack[stack_points + 1];
+            std::vector<T> dists_heap;
+            std::vector<int> sides_heap;
+            T *dists = dists_stack;
+            int *sides = sides_stack;
+            if (n > stack_points)
+            {
+                dists_heap.resize((size_t)n + 1);
+                sides_heap.resize((size_t)n + 1);
+                dists = dists_heap.data();
+                sides = sides_heap.data();
+            }
             int counts[3] = { 0, 0, 0 };
 
             for (int i = 0; i < n; i++)
@@ -311,7 +325,10 @@ namespace math
             if (counts[side_back] == 0)
                 return true;
 
-            std::vector<vec3<T>> new_points;
+            // build into a per thread scratch, then copy back into this
+            // winding's own storage so the steady state allocates nothing
+            thread_local std::vector<vec3<T>> new_points;
+            new_points.clear();
             new_points.reserve((size_t)n + 4);
             for (int i = 0; i < n; i++)
             {
@@ -343,7 +360,7 @@ namespace math
                 new_points.push_back(mid);
             }
 
-            points_ = std::move(new_points);
+            points_.assign(new_points.begin(), new_points.end());
             remove_colinear_points();
             return !points_.empty();
         }
