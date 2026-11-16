@@ -50,7 +50,11 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
           tag="v$version"
-          tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+          # gh api writes the error body to stdout on a 404, so a missing tag
+          # is told apart by the exit status rather than by empty output
+          if ! tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+            tagged=""
+          fi
           if [ -z "$tagged" ]; then
             gh release create "$tag" \
               --target "$GITHUB_SHA" \
