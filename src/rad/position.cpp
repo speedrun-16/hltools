@@ -305,6 +305,7 @@ namespace rad
         const format::map_data &map = *state.map;
         const format::dface_t *f = &map.faces[(size_t)facenum];
         translate_world_to_tex(state, facenum, out.worldtotex);
+        out.textoworld_valid = invert_matrix(out.worldtotex, out.textoworld);
         out.flipped = calc_matrix_sign(out.worldtotex) < 0.0;
         math::winding facewinding = winding_from_face(state, *f);
         {
@@ -318,6 +319,7 @@ namespace rad
         }
         out.texwinding.remove_colinear_points();
         out.edgetex.resize((size_t)f->numedges * 2);
+        out.smooth_edges.clear();
         for (int i = 0; i < f->numedges; i++)
         {
             const int se = map.surfedges[(size_t)(f->firstedge + i)];
@@ -330,6 +332,12 @@ namespace rad
             apply_matrix(out.worldtotex, p1, out.edgetex[(size_t)i * 2]);
             vec3v p2{dv2[0], dv2[1], dv2[2]};
             apply_matrix(out.worldtotex, p2, out.edgetex[(size_t)i * 2 + 1]);
+            if ((size_t)edgenum < state.edgeshares.size())
+            {
+                const edgeshare &es = state.edgeshares[(size_t)edgenum];
+                if (es.smooth)
+                    out.smooth_edges.push_back(i);
+            }
         }
         out.valid = true;
     }

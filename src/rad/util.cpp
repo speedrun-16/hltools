@@ -1,6 +1,12 @@
 #include <cmath>
 #include <cstdlib>
 
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__SSE2__) \
+    || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define HLTOOLS_RAD_SSE2 1
+#include <emmintrin.h>
+#endif
+
 #include "../common/error.h"
 #include "internal.h"
 
@@ -800,142 +806,145 @@ namespace rad
 
     // the weighted solid angle of an emitter winding as seen from a receiver,
     // sampled over the precomputed sky normal set of the given level
+    namespace
+    {
+        template <typename AccumFn>
+        vec_t integrate_sight_area(const rad_state &state, const vec3v &receiver_origin,
+                                   const vec3v &receiver_normal, const math::winding *emitter_winding,
+                                   int skylevel, vec_t lighting_scale, AccumFn &&accum)
+        {
+            vec_t area = 0.0;
+
+            const int numedges = emitter_winding->size();
+            // runs once per (sample, nearby texlight patch); avoid heap traffic
+            vec3v edges_stack[max_points_on_winding];
+            std::vector<vec3v> edges_heap;
+            vec3v *edges = edges_stack;
+            if (numedges > max_points_on_winding)
+            {
+                edges_heap.resize((size_t)numedges);
+                edges = edges_heap.data();
+            }
+
+            bool error = false;
+            for (int x = 0; x < numedges; x++)
+            {
+                vec3v v1, v2, normal;
+                math::subtract((*emitter_winding)[x], receiver_origin, v1);
+                math::subtract((*emitter_winding)[(x + 1) % numedges], receiver_origin, v2);
+                math::cross(v1, v2, normal); // pointing inward
+                if (!math::normalize(normal))
+                    error = true;
+                math::copy(normal, edges[x]);
+            }
+
+            if (!error)
+            {
+                const int count = state.numskynormals[skylevel];
+                const vec3v *normals = state.skynormals[skylevel].data();
+                const vec_t *psize = state.skynormalsizes[skylevel].data();
+                int i = 0;
+#if HLTOOLS_RAD_SSE2
+                const float *sx = state.skynormals_x[skylevel].data();
+                const float *sy = state.skynormals_y[skylevel].data();
+                const float *sz = state.skynormals_z[skylevel].data();
+                const __m128 zero = _mm_setzero_ps();
+                const __m128 rnx = _mm_set1_ps(receiver_normal[0]);
+                const __m128 rny = _mm_set1_ps(receiver_normal[1]);
+                const __m128 rnz = _mm_set1_ps(receiver_normal[2]);
+                const int simd_end = count & ~3;
+                for (; i < simd_end; i += 4)
+                {
+                    const __m128 nx = _mm_loadu_ps(sx + i);
+                    const __m128 ny = _mm_loadu_ps(sy + i);
+                    const __m128 nz = _mm_loadu_ps(sz + i);
+                    // exact scalar dot order: (nx * rnx + ny * rny) + nz * rnz
+                    const __m128 dotv = _mm_add_ps(
+                        _mm_add_ps(_mm_mul_ps(nx, rnx), _mm_mul_ps(ny, rny)),
+                        _mm_mul_ps(nz, rnz));
+                    int mask = _mm_movemask_ps(_mm_cmpgt_ps(dotv, zero));
+                    if (!mask)
+                        continue;
+                    for (int j = 0; j < numedges; j++)
+                    {
+                        const vec3v &e = edges[j];
+                        const __m128 edot = _mm_add_ps(
+                            _mm_add_ps(_mm_mul_ps(nx, _mm_set1_ps(e[0])),
+                                       _mm_mul_ps(ny, _mm_set1_ps(e[1]))),
+                            _mm_mul_ps(nz, _mm_set1_ps(e[2])));
+                        mask &= _mm_movemask_ps(_mm_cmpgt_ps(edot, zero));
+                        if (!mask)
+                            break;
+                    }
+                    if (!mask)
+                        continue;
+                    alignas(16) float dots[4];
+                    _mm_store_ps(dots, dotv);
+                    for (int lane = 0; lane < 4; lane++)
+                    {
+                        if (!(mask & (1 << lane)))
+                            continue;
+                        area += accum(normals[i + lane], dots[lane]) * psize[i + lane];
+                    }
+                }
+#endif
+                for (; i < count; i++)
+                {
+                    const vec3v &n = normals[i];
+                    vec_t dot = math::dot(n, receiver_normal);
+                    if (dot <= 0)
+                        continue;
+                    int j;
+                    for (j = 0; j < numedges; j++)
+                    {
+                        if (math::dot(n, edges[j]) <= 0)
+                            break;
+                    }
+                    if (j < numedges)
+                        continue;
+                    area += accum(n, dot) * psize[i];
+                }
+                area = (vec_t)(area * 4 * math::pi); // convert to absolute sphere area
+            }
+
+            area *= lighting_scale;
+            return area;
+        }
+    }
+
     vec_t calc_sight_area(const rad_state &state, const vec3v &receiver_origin, const vec3v &receiver_normal,
                           const math::winding *emitter_winding, int skylevel,
                           vec_t lighting_power, vec_t lighting_scale)
     {
-        vec_t area = 0.0;
-
-        int numedges = emitter_winding->size();
-        // this function runs once per (sample, nearby texlight patch); avoid heap traffic
-        vec3v edges_stack[max_points_on_winding];
-        std::vector<vec3v> edges_heap;
-        vec3v *edges = edges_stack;
-        if (numedges > max_points_on_winding)
-        {
-            edges_heap.resize((size_t)numedges);
-            edges = edges_heap.data();
-        }
-        bool error = false;
-        for (int x = 0; x < numedges; x++)
-        {
-            vec3v v1, v2, normal;
-            math::subtract((*emitter_winding)[x], receiver_origin, v1);
-            math::subtract((*emitter_winding)[(x + 1) % numedges], receiver_origin, v2);
-            math::cross(v1, v2, normal); // pointing inward
-            if (!math::normalize(normal))
-            {
-                error = true;
-            }
-            math::copy(normal, edges[x]);
-        }
-        if (!error)
-        {
-            const vec3v *pnormal = state.skynormals[skylevel].data();
-            const vec_t *psize = state.skynormalsizes[skylevel].data();
-            for (int i = 0; i < state.numskynormals[skylevel]; i++, pnormal++, psize++)
-            {
-                vec_t dot = math::dot(*pnormal, receiver_normal);
-                if (dot <= 0)
-                    continue;
-                int j;
-                const vec3v *pedge = edges;
-                for (j = 0; j < numedges; j++, pedge++)
-                {
-                    if (math::dot(*pnormal, *pedge) <= 0)
-                    {
-                        break;
-                    }
-                }
-                if (j < numedges)
-                {
-                    continue;
-                }
-                if (lighting_power != 1.0)
-                {
-                    dot = (vec_t)std::pow((double)dot, lighting_power);
-                }
-                area += dot * (*psize);
-            }
-            area = (vec_t)(area * 4 * math::pi); // convert to absolute sphere area
-        }
-        area *= lighting_scale;
-        return area;
+        return integrate_sight_area(state, receiver_origin, receiver_normal, emitter_winding,
+                                    skylevel, lighting_scale,
+                                    [&](const vec3v &, vec_t dot) {
+                                        if (lighting_power != 1.0)
+                                            dot = (vec_t)std::pow((double)dot, lighting_power);
+                                        return dot;
+                                    });
     }
 
     // as calc_sight_area, but attenuated by the spotlight cone:
-    //   ratio = 10 when dot2 >= stopdot, 00 when stopdot2 >= dot2,
+    //   ratio = 1.0 when dot2 >= stopdot, 0.0 when stopdot2 >= dot2,
     //   linear in between
     vec_t calc_sight_area_spotlight(const rad_state &state, const vec3v &receiver_origin, const vec3v &receiver_normal,
                                     const math::winding *emitter_winding, const vec3v &emitter_normal,
                                     vec_t emitter_stopdot, vec_t emitter_stopdot2, int skylevel,
                                     vec_t lighting_power, vec_t lighting_scale)
     {
-        vec_t area = 0.0;
-
-        int numedges = emitter_winding->size();
-        vec3v edges_stack[max_points_on_winding];
-        std::vector<vec3v> edges_heap;
-        vec3v *edges = edges_stack;
-        if (numedges > max_points_on_winding)
-        {
-            edges_heap.resize((size_t)numedges);
-            edges = edges_heap.data();
-        }
-        bool error = false;
-        for (int x = 0; x < numedges; x++)
-        {
-            vec3v v1, v2, normal;
-            math::subtract((*emitter_winding)[x], receiver_origin, v1);
-            math::subtract((*emitter_winding)[(x + 1) % numedges], receiver_origin, v2);
-            math::cross(v1, v2, normal); // pointing inward
-            if (!math::normalize(normal))
-            {
-                error = true;
-            }
-            math::copy(normal, edges[x]);
-        }
-        if (!error)
-        {
-            const vec3v *pnormal = state.skynormals[skylevel].data();
-            const vec_t *psize = state.skynormalsizes[skylevel].data();
-            for (int i = 0; i < state.numskynormals[skylevel]; i++, pnormal++, psize++)
-            {
-                vec_t dot = math::dot(*pnormal, receiver_normal);
-                if (dot <= 0)
-                    continue;
-                int j;
-                const vec3v *pedge = edges;
-                for (j = 0; j < numedges; j++, pedge++)
-                {
-                    if (math::dot(*pnormal, *pedge) <= 0)
-                    {
-                        break;
-                    }
-                }
-                if (j < numedges)
-                {
-                    continue;
-                }
-                if (lighting_power != 1.0)
-                {
-                    dot = (vec_t)std::pow((double)dot, lighting_power);
-                }
-                vec_t dot2 = -math::dot(*pnormal, emitter_normal);
-                if (dot2 <= emitter_stopdot2 + math::normal_epsilon)
-                {
-                    dot = 0;
-                }
-                else if (dot2 < emitter_stopdot)
-                {
-                    dot = dot * (dot2 - emitter_stopdot2) / (emitter_stopdot - emitter_stopdot2);
-                }
-                area += dot * (*psize);
-            }
-            area = (vec_t)(area * 4 * math::pi); // convert to absolute sphere area
-        }
-        area *= lighting_scale;
-        return area;
+        return integrate_sight_area(state, receiver_origin, receiver_normal, emitter_winding,
+                                    skylevel, lighting_scale,
+                                    [&](const vec3v &pnormal, vec_t dot) {
+                                        if (lighting_power != 1.0)
+                                            dot = (vec_t)std::pow((double)dot, lighting_power);
+                                        vec_t dot2 = -math::dot(pnormal, emitter_normal);
+                                        if (dot2 <= emitter_stopdot2 + math::normal_epsilon)
+                                            return (vec_t)0;
+                                        if (dot2 < emitter_stopdot)
+                                            dot = dot * (dot2 - emitter_stopdot2) / (emitter_stopdot - emitter_stopdot2);
+                                        return dot;
+                                    });
     }
 
     // ===== alternate patch origin =====

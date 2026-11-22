@@ -48,6 +48,7 @@ namespace rad
         std::vector<std::vector<gpu::work_item_gpu>> face_items;
         std::vector<std::vector<byte>> pvs_rows;
         std::unordered_map<std::string, int> row_lookup;
+        std::vector<int> leaf_pvs_row; // precomputed pvs_row per map leaf
         std::mutex row_mutex;
         size_t rowbytes = 0;
 
@@ -58,6 +59,7 @@ namespace rad
         gpu::gather_results results;
         int style_to_compact[allstyles];
         std::vector<int> compact_to_style;
+        std::vector<int> active_styles;
     };
 
     namespace
@@ -82,6 +84,51 @@ namespace rad
         constexpr unsigned gather_recovery_dispatches = 4;
         constexpr size_t gather_chunk_min = 256;
         constexpr size_t gather_chunk_start = 2048;
+
+        void precompute_leaf_pvs_rows(const rad_state &state, gpu_gather_data &d)
+        {
+            const format::map_data &map = *state.map;
+            d.leaf_pvs_row.assign(map.leafs.size(), 0);
+            if (map.visibility.empty())
+            {
+                std::vector<byte> all_vis(d.rowbytes, 255);
+                std::string key((const char *)all_vis.data(), d.rowbytes);
+                d.row_lookup.emplace(std::move(key), 0);
+                d.pvs_rows.push_back(std::move(all_vis));
+                return;
+            }
+
+            std::unordered_map<int, int> visofs_to_row;
+            std::vector<byte> pvs_buf(d.rowbytes, 0);
+            for (size_t li = 0; li < map.leafs.size(); li++)
+            {
+                const int visofs = map.leafs[li].visofs;
+                auto vit = visofs_to_row.find(visofs);
+                if (vit != visofs_to_row.end())
+                {
+                    d.leaf_pvs_row[li] = vit->second;
+                    continue;
+                }
+                if (visofs == -1)
+                {
+                    std::memset(pvs_buf.data(), 0, d.rowbytes);
+                }
+                else
+                {
+                    decompress_vis(state, &map.visibility[(size_t)visofs],
+                                   pvs_buf.data(), (unsigned int)d.rowbytes);
+                }
+                std::string key((const char *)pvs_buf.data(), d.rowbytes);
+                auto rit = d.row_lookup.find(key);
+                if (rit == d.row_lookup.end())
+                {
+                    rit = d.row_lookup.emplace(std::move(key), (int)d.pvs_rows.size()).first;
+                    d.pvs_rows.emplace_back(pvs_buf.begin(), pvs_buf.end());
+                }
+                visofs_to_row.emplace(visofs, rit->second);
+                d.leaf_pvs_row[li] = rit->second;
+            }
+        }
 
         // mirrors texlightgap_setup in gather_sample_light
         void face_gap_vectors(const rad_state &state, int facenum, float *out6)
@@ -476,6 +523,14 @@ namespace rad
         t_current_face = facenum;
     }
 
+    int gpu_gather_pvs_row(const rad_state &state, int leaf_index)
+    {
+        const gpu_gather_data *d = state.gpu_gather;
+        if (!d || leaf_index < 0 || (size_t)leaf_index >= d->leaf_pvs_row.size())
+            return -1;
+        return d->leaf_pvs_row[(size_t)leaf_index];
+    }
+
     void gpu_gather_intercept(rad_state &state, const vec3v &pos, const byte *pvs,
                               const vec3v &normal, vec3v *sample, byte *styles, int step,
                               int miptex, int texlightgap_surfacenum, int *cached_pvs_row)
@@ -539,7 +594,7 @@ namespace rad
 
         // the same tail merge the cpu gather ends with: coring threshold,
         // style slot assignment, discarded light bookkeeping
-        for (int style = 0; style < allstyles; ++style)
+        for (int style : d.active_styles)
         {
             const int compact = d.style_to_compact[style];
             const bool touched = compact >= 0 && (touched_mask & (1u << compact));
@@ -631,16 +686,18 @@ namespace rad
             return false;
         }
 
-        // Place samples and record gather calls without building face lights.
-        state.gpu_gather_phase = 1;
-        threads::run_phase("lighting", "collecting light samples", (int)map.faces.size(),
-                           [&](int i)
-                           {
-                               gpu_gather_begin_face(i);
-                               build_facelights(state, i);
-                           });
+        // precompute the deduplicated pvs row index for every map leaf once
+        // so the collect pass avoids decompress_vis and mutex lookups per sample
+        precompute_leaf_pvs_rows(state, *d);
 
-        // flatten face major
+        // place samples and record gather calls without building face lights
+        state.gpu_gather_phase = 1;
+        threads::run_phase("lighting", "collecting light samples", (int)map.faces.size(), [&](int i) {
+            gpu_gather_begin_face(i);
+            build_facelights(state, i);
+        });
+
+        // flatten face major in parallel
         size_t total = 0;
         d->face_first.resize(map.faces.size());
         for (size_t f = 0; f < map.faces.size(); f++)
@@ -648,13 +705,17 @@ namespace rad
             d->face_first[f] = (int)total;
             total += d->face_items[f].size();
         }
-        d->items.reserve(total);
-        for (size_t f = 0; f < map.faces.size(); f++)
-        {
-            d->items.insert(d->items.end(), d->face_items[f].begin(), d->face_items[f].end());
-            d->face_items[f].clear();
-            d->face_items[f].shrink_to_fit();
-        }
+        d->items.resize(total);
+        threads::run((int)map.faces.size(), [&](int f) {
+            auto &src = d->face_items[(size_t)f];
+            if (!src.empty())
+            {
+                std::memcpy(&d->items[(size_t)d->face_first[(size_t)f]],
+                            src.data(), src.size() * sizeof(gpu::work_item_gpu));
+                src.clear();
+                src.shrink_to_fit();
+            }
+        });
         if (d->items.empty())
         {
             logging::warn("-gpu: no light samples collected; using the cpu path");
@@ -826,10 +887,14 @@ namespace rad
         // Style zero and the face's emitter style can already occupy slots.
         // Negative coring also admits zero contributions from absent styles.
         int cache_styles = 2;
+        d->active_styles.clear();
         for (int style = 0; style < allstyles; style++)
         {
             if (d->style_to_compact[style] >= 0 || state.corings[style] < 0)
+            {
                 cache_styles++;
+                d->active_styles.push_back(style);
+            }
         }
         state.gpu_gather_cache_styles = std::min(cache_styles, allstyles);
         state.gpu_gather_phase = 2;
@@ -868,6 +933,11 @@ namespace rad
 
     void gpu_gather_begin_face(int)
     {
+    }
+
+    int gpu_gather_pvs_row(const rad_state &, int)
+    {
+        return -1;
     }
 
     void gpu_gather_intercept(rad_state &, const vec3v &, const byte *, const vec3v &,

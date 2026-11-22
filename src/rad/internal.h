@@ -429,9 +429,12 @@ namespace rad
     {
         bool valid = false;
         matrix worldtotex;
+        matrix textoworld;
+        bool textoworld_valid = false;
         bool flipped = false;       // calc_matrix_sign(worldtotex) < 0
         math::winding texwinding;   // face winding in texture space, z = 0
         std::vector<vec3v> edgetex; // per face edge: both ends in texture space
+        std::vector<int> smooth_edges; // edge indices with es->smooth and distinct neighbor
     };
 
     struct position_map
@@ -490,6 +493,9 @@ namespace rad
         int numskynormals[skylevel_max + 1] = {};
         std::vector<vec3v> skynormals[skylevel_max + 1];
         std::vector<vec_t> skynormalsizes[skylevel_max + 1]; // weight per normal
+        std::vector<float> skynormals_x[skylevel_max + 1];
+        std::vector<float> skynormals_y[skylevel_max + 1];
+        std::vector<float> skynormals_z[skylevel_max + 1];
 
         // per miptex tables read from the worldspawn texture keys
         std::vector<vec_t> smoothvalues;
@@ -801,6 +807,7 @@ namespace rad
     // texlightgap_surfacenum can be a neighboring face, so it cannot key the
     // per face item lists without racing)
     void gpu_gather_begin_face(int facenum);
+    int gpu_gather_pvs_row(const rad_state &state, int leaf_index);
     void gpu_gather_intercept(rad_state &state, const vec3v &pos, const byte *pvs,
                               const vec3v &normal, vec3v *sample, byte *styles, int step,
                               int miptex, int texlightgap_surfacenum, int *cached_pvs_row);

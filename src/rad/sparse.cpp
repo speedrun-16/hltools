@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -136,93 +137,138 @@ namespace rad
             return false;
         }
 
+        struct vis_face_info
+        {
+            vec3v normal;
+            vec_t plane_dist = 0;
+            vec3v bounds_min;
+            vec3v bounds_max;
+            unsigned max_patch = 0;
+        };
+
         // sets vis bits for all patches in the face
         void test_patch_to_face(rad_state &state, const unsigned patchnum, const int facenum,
-                                const byte *pvs, std::vector<byte> &bits)
+                                const byte *pvs, std::vector<byte> &bits,
+                                const vis_face_info &src_face, const vis_face_info &dst_face,
+                                bool has_opaque)
         {
             patch *pt = &state.patches[patchnum];
             patch *patch2 = state.face_patches[(size_t)facenum];
+            if (!patch2 || dst_face.max_patch <= patchnum)
+                return;
+
+            const vec3v &n2 = dst_face.normal;
+            const vec_t d2 = dst_face.plane_dist;
+            const vec_t pt_dot_n2 = math::dot(pt->origin, n2);
 
             // if emitter is behind that face plane, skip all patches
+            if (!(pt_dot_n2 > d2 + math::on_epsilon - pt->emitter_range))
+                return;
 
-            if (patch2)
+            // if the entire target face (including alternate-origin margin)
+            // lies behind the source patch's plane, no patch on it can pass
+            const vec3v &n1 = src_face.normal;
+            const vec_t pt_thresh = src_face.plane_dist + minimum_patch_distance;
+            const vec_t max_dst_dot =
+                (n1[0] >= 0 ? dst_face.bounds_max[0] : dst_face.bounds_min[0]) * n1[0]
+                + (n1[1] >= 0 ? dst_face.bounds_max[1] : dst_face.bounds_min[1]) * n1[1]
+                + (n1[2] >= 0 ? dst_face.bounds_max[2] : dst_face.bounds_min[2]) * n1[2];
+            if (max_dst_dot <= pt_thresh - (vec_t)0.01)
+                return;
+
+            const vec_t f2_thresh = d2 + minimum_patch_distance;
+            const bool pt_in_front_of_f2 = pt_dot_n2 > f2_thresh;
+            const float r1 = pt->emitter_range - (float)math::on_epsilon;
+            const patch *const patches_base = state.patches.data();
+
+            for (; patch2; patch2 = patch2->next)
             {
-                const plane *plane2 = plane_from_face_number(state, (unsigned)facenum);
-
-                if (math::dot(pt->origin, plane2->normal) > patch_plane_dist(state, patch2) + math::on_epsilon - pt->emitter_range)
+                const unsigned m = (unsigned)(patch2 - patches_base);
+                if (m <= patchnum)
+                    continue;
+                if (patch2->leafnum == 0
+                    || !(pvs[(patch2->leafnum - 1) >> 3] & (1 << ((patch2->leafnum - 1) & 7))))
                 {
-                    // we need to do a real test
-                    const plane *pl = plane_from_face_number(state, (unsigned)pt->facenumber);
+                    continue;
+                }
 
-                    for (; patch2; patch2 = patch2->next)
+                vec3v delta;
+                math::subtract(pt->origin, patch2->origin, delta);
+                const float dist_sq = math::dot(delta, delta);
+                const float r2 = patch2->emitter_range - (float)math::on_epsilon;
+                const float rmax = r2 > r1 ? r2 : r1;
+
+                vec3v origin1, origin2;
+                const vec3v *p1;
+                const vec3v *p2;
+                if (rmax <= 0.0f || dist_sq >= (rmax + 0.01f) * (rmax + 0.01f))
+                {
+                    // Neither patch is within its emitter range: alternate
+                    // origins cannot trigger, so avoid sqrt and redundant dot.
+                    if (!pt_in_front_of_f2)
+                        continue;
+                    if (math::dot(patch2->origin, n1) <= pt_thresh)
+                        continue;
+                    p1 = &pt->origin;
+                    p2 = &patch2->origin;
+                }
+                else
+                {
+                    const vec_t dist = (vec_t)std::sqrt((double)dist_sq);
+                    if (dist < patch2->emitter_range - math::on_epsilon)
                     {
-                        unsigned m = (unsigned)(patch2 - state.patches.data());
+                        get_alternate_origin(state, pt->origin, n1, patch2, origin2);
+                    }
+                    else
+                    {
+                        math::copy(patch2->origin, origin2);
+                    }
+                    if (math::dot(origin2, n1) <= pt_thresh)
+                    {
+                        continue;
+                    }
+                    if (dist < pt->emitter_range - math::on_epsilon)
+                    {
+                        get_alternate_origin(state, patch2->origin, n2, pt, origin1);
+                    }
+                    else
+                    {
+                        math::copy(pt->origin, origin1);
+                    }
+                    if (math::dot(origin1, n2) <= f2_thresh)
+                    {
+                        continue;
+                    }
+                    p1 = &origin1;
+                    p2 = &origin2;
+                }
 
-                        vec3v transparency = {1.0, 1.0, 1.0};
-                        int opaquestyle = -1;
+                if (test_line(state, *p1, *p2) != contents_empty)
+                {
+                    continue;
+                }
 
-                        // check vis between patch and patch2
-                        // if bit has not already been set
-                        //  && v2 is not behind light plane
-                        //  && v2 is visible from v1
-                        if (m > patchnum)
-                        {
-                            if (patch2->leafnum == 0 || !(pvs[(patch2->leafnum - 1) >> 3] & (1 << ((patch2->leafnum - 1) & 7))))
-                            {
-                                continue;
-                            }
-                            vec3v origin1, origin2;
-                            vec3v delta;
-                            vec_t dist;
-                            math::subtract(pt->origin, patch2->origin, delta);
-                            dist = (vec_t)math::length(delta);
-                            if (dist < patch2->emitter_range - math::on_epsilon)
-                            {
-                                get_alternate_origin(state, pt->origin, pl->normal, patch2, origin2);
-                            }
-                            else
-                            {
-                                math::copy(patch2->origin, origin2);
-                            }
-                            if (math::dot(origin2, pl->normal) <= patch_plane_dist(state, pt) + minimum_patch_distance)
-                            {
-                                continue;
-                            }
-                            if (dist < pt->emitter_range - math::on_epsilon)
-                            {
-                                get_alternate_origin(state, patch2->origin, plane2->normal, pt, origin1);
-                            }
-                            else
-                            {
-                                math::copy(pt->origin, origin1);
-                            }
-                            if (math::dot(origin1, plane2->normal) <= patch_plane_dist(state, patch2) + minimum_patch_distance)
-                            {
-                                continue;
-                            }
-                            if (test_line(state, origin1, origin2) != contents_empty)
-                            {
-                                continue;
-                            }
-                            if (test_segment_against_opaque_list(state, origin1, origin2, transparency, opaquestyle))
-                            {
-                                continue;
-                            }
+                if (has_opaque)
+                {
+                    vec3v transparency = {1.0, 1.0, 1.0};
+                    int opaquestyle = -1;
+                    if (test_segment_against_opaque_list(state, *p1, *p2, transparency, opaquestyle))
+                    {
+                        continue;
+                    }
 
-                            if (opaquestyle != -1)
-                            {
-                                add_style_to_style_array(state, m, patchnum, opaquestyle);
-                                add_style_to_style_array(state, patchnum, m, opaquestyle);
-                            }
+                    if (opaquestyle != -1)
+                    {
+                        add_style_to_style_array(state, m, patchnum, opaquestyle);
+                        add_style_to_style_array(state, patchnum, m, opaquestyle);
+                    }
 
-                            if (state.options.customshadow_with_bouncelight && !math::equal(transparency, vec3_one))
-                            {
-                                add_transparency_to_raw_array(state, patchnum, m, transparency);
-                            }
-                            add_visible_patch(bits, m);
-                        }
+                    if (state.options.customshadow_with_bouncelight && !math::equal(transparency, vec3_one))
+                    {
+                        add_transparency_to_raw_array(state, patchnum, m, transparency);
                     }
                 }
+                add_visible_patch(bits, m);
             }
         }
 
@@ -248,6 +294,7 @@ namespace rad
             int leaf = -1;
             bool active = false;
             std::vector<byte> pvs;
+            std::vector<byte> visible_faces;
             std::vector<int> candidates;
         };
         thread_local vis_leaf_cache tls_leaf_cache;
@@ -255,7 +302,7 @@ namespace rad
 
         // returns false when the leaf contributes no columns
         bool prepare_vis_leaf(rad_state &state, int i, unsigned generation,
-                              const std::vector<std::vector<patch *>> &patches_by_leaf,
+                              const std::vector<std::vector<int>> &faces_by_leaf,
                               const std::vector<int> &unindexed_faces)
         {
             vis_leaf_cache &c = tls_leaf_cache;
@@ -283,19 +330,19 @@ namespace rad
 
             // Every patch in this source leaf shares its PVS. Cull whole
             // faces once, then keep the original face and patch order.
-            std::vector<byte> visible_faces(state.map->faces.size(), 0);
+            c.visible_faces.assign(state.map->faces.size(), 0);
             for (int facenum : unindexed_faces)
-                visible_faces[(size_t)facenum] = 1;
-            for (size_t leaf = 1; leaf < patches_by_leaf.size(); leaf++)
+                c.visible_faces[(size_t)facenum] = 1;
+            for (size_t leaf = 1; leaf < faces_by_leaf.size(); leaf++)
             {
                 if (!(pvs[(leaf - 1) >> 3] & (1u << ((leaf - 1) & 7))))
                     continue;
-                for (const patch *target : patches_by_leaf[leaf])
-                    visible_faces[(size_t)target->facenumber] = 1;
+                for (int facenum : faces_by_leaf[leaf])
+                    c.visible_faces[(size_t)facenum] = 1;
             }
-            for (size_t face = 0; face < visible_faces.size(); face++)
+            for (size_t face = 0; face < c.visible_faces.size(); face++)
             {
-                if (visible_faces[face])
+                if (c.visible_faces[face])
                     c.candidates.push_back((int)face);
             }
             c.active = true;
@@ -305,9 +352,12 @@ namespace rad
         // one work item per leaf slice; runs on multiple threads
         void build_vis_slice_item(rad_state &state, const vis_leaf_slice &slice, unsigned generation,
                                   const std::vector<std::vector<patch *>> &patches_by_leaf,
-                                  const std::vector<int> &unindexed_faces)
+                                  const std::vector<std::vector<int>> &faces_by_leaf,
+                                  const std::vector<int> &unindexed_faces,
+                                  const std::vector<vis_face_info> &face_info,
+                                  bool has_opaque)
         {
-            if (!prepare_vis_leaf(state, slice.leaf, generation, patches_by_leaf, unindexed_faces))
+            if (!prepare_vis_leaf(state, slice.leaf, generation, faces_by_leaf, unindexed_faces))
                 return;
             const vis_leaf_cache &c = tls_leaf_cache;
             const std::vector<patch *> &sources = patches_by_leaf[(size_t)slice.leaf];
@@ -316,9 +366,11 @@ namespace rad
                 const patch *pt = sources[s];
                 const unsigned patchnum = (unsigned)(pt - state.patches.data());
                 tls_vis_bits.assign((state.num_patches + 7) / 8, 0);
+                const vis_face_info &src_info = face_info[(size_t)pt->facenumber];
                 auto target = std::upper_bound(c.candidates.begin(), c.candidates.end(), pt->facenumber);
                 for (; target != c.candidates.end(); ++target)
-                    test_patch_to_face(state, patchnum, *target, c.pvs.data(), tls_vis_bits);
+                    test_patch_to_face(state, patchnum, *target, c.pvs.data(), tls_vis_bits,
+                                       src_info, face_info[(size_t)*target], has_opaque);
                 set_vis_column(state, patchnum, tls_vis_bits);
             }
         }
@@ -565,18 +617,61 @@ namespace rad
 #endif
             const int visleafs = state.map->models[0].visleafs;
             std::vector<std::vector<patch *>> patches_by_leaf((size_t)visleafs + 1);
+            std::vector<std::vector<int>> faces_by_leaf((size_t)visleafs + 1);
             std::vector<int> unindexed_faces;
+            std::vector<vis_face_info> face_info(state.map->faces.size());
+            const patch *const patches_base = state.patches.data();
             for (size_t face = 0; face < state.map->faces.size(); face++)
             {
-                for (patch *pt = state.face_patches[face]; pt; pt = pt->next)
+                patch *first = state.face_patches[face];
+                if (!first)
+                    continue;
+                vis_face_info &fi = face_info[face];
+                const plane *pl = plane_from_face_number(state, (unsigned)face);
+                fi.normal = pl->normal;
+                fi.plane_dist = pl->dist + math::dot(state.face_offset[face], pl->normal);
+                fi.bounds_min = vec3v{bogus_range, bogus_range, bogus_range};
+                fi.bounds_max = vec3v{-bogus_range, -bogus_range, -bogus_range};
+                auto grow = [&](const vec3v &v)
                 {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        if (v[c] < fi.bounds_min[c])
+                            fi.bounds_min[c] = v[c];
+                        if (v[c] > fi.bounds_max[c])
+                            fi.bounds_max[c] = v[c];
+                    }
+                };
+                for (patch *pt = first; pt; pt = pt->next)
+                {
+                    const unsigned m = (unsigned)(pt - patches_base);
+                    if (m > fi.max_patch)
+                        fi.max_patch = m;
+                    grow(pt->origin);
+                    if (pt->winding)
+                    {
+                        for (int v = 0; v < pt->winding->size(); v++)
+                            grow((*pt->winding)[v]);
+                    }
                     if (pt->leafnum > 0 && pt->leafnum <= visleafs)
+                    {
                         patches_by_leaf[(size_t)pt->leafnum].push_back(pt);
+                        auto &fl = faces_by_leaf[(size_t)pt->leafnum];
+                        if (fl.empty() || fl.back() != (int)face)
+                            fl.push_back((int)face);
+                    }
                     else if (pt->leafnum > visleafs
                              && (unindexed_faces.empty() || unindexed_faces.back() != (int)face))
                         unindexed_faces.push_back((int)face);
                 }
+                // Margin for get_alternate_origin's hunt_offset (0.5) + hunt_for_world (2.0).
+                for (int c = 0; c < 3; c++)
+                {
+                    fi.bounds_min[c] -= 4.0f;
+                    fi.bounds_max[c] += 4.0f;
+                }
             }
+            const bool has_opaque = !state.opaque_list.empty() || state.num_studio_models != 0;
             // slice size: small leaves stay whole (one candidate build each),
             // dense leaves split so the tail is a fraction of a percent
             const unsigned slice_patches = std::max<unsigned>(
@@ -590,7 +685,8 @@ namespace rad
             }
             const unsigned generation = ++g_vis_generation;
             auto item = [&](int i) {
-                build_vis_slice_item(state, slices[(size_t)i], generation, patches_by_leaf, unindexed_faces);
+                build_vis_slice_item(state, slices[(size_t)i], generation, patches_by_leaf,
+                                     faces_by_leaf, unindexed_faces, face_info, has_opaque);
             };
             if (show_progress)
             {

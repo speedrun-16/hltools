@@ -150,13 +150,6 @@ namespace rad
         }
 
         constexpr int testline_stack_size = 128;
-
-        struct testline_span
-        {
-            int node;
-            vec3v start;
-            vec3v stop;
-        };
     }
 
     // iterative version of test_line_r this is the single hottest function of
@@ -168,55 +161,63 @@ namespace rad
     // same semantics
     int test_line(const rad_state &state, const vec3v &start, const vec3v &stop, vec_t *skyhit)
     {
+        constexpr float half_eps = 0.02f; // exact float equivalent of math::on_epsilon / 2
+        constexpr float eps = 0.04f;      // exact float equivalent of math::on_epsilon
+        const tnode *const tnodes = state.tnodes.data();
+
         int linecontent = 0;
-        testline_span stack[testline_stack_size];
-        testline_span *top = stack; // first free slot
+        int node_stack[testline_stack_size];
+        vec3v point_stack[testline_stack_size + 1];
+        point_stack[0] = stop;
+        int depth = 0;
+
         int node = 0;
-        vec3v curstart, curstop;
-        math::copy(start, curstart);
-        math::copy(stop, curstop);
+        float sx = start[0], sy = start[1], sz = start[2];
+        float ex = stop[0], ey = stop[1], ez = stop[2];
 
         while (1)
         {
             while (node >= 0)
             {
-                const tnode *tn = &state.tnodes[(size_t)node];
+                const tnode *tn = &tnodes[(size_t)node];
                 float front, back;
                 switch (tn->type)
                 {
                 case plane_x:
-                    front = curstart[0] - tn->dist;
-                    back = curstop[0] - tn->dist;
+                    front = sx - tn->dist;
+                    back = ex - tn->dist;
                     break;
                 case plane_y:
-                    front = curstart[1] - tn->dist;
-                    back = curstop[1] - tn->dist;
+                    front = sy - tn->dist;
+                    back = ey - tn->dist;
                     break;
                 case plane_z:
-                    front = curstart[2] - tn->dist;
-                    back = curstop[2] - tn->dist;
+                    front = sz - tn->dist;
+                    back = ez - tn->dist;
                     break;
                 default:
-                    front = (curstart[0] * tn->normal[0] + curstart[1] * tn->normal[1] + curstart[2] * tn->normal[2]) - tn->dist;
-                    back = (curstop[0] * tn->normal[0] + curstop[1] * tn->normal[1] + curstop[2] * tn->normal[2]) - tn->dist;
+                    front = (sx * tn->normal[0] + sy * tn->normal[1] + sz * tn->normal[2]) - tn->dist;
+                    back = (ex * tn->normal[0] + ey * tn->normal[1] + ez * tn->normal[2]) - tn->dist;
                     break;
                 }
 
-                if (front > math::on_epsilon / 2 && back > math::on_epsilon / 2)
+                if (front > half_eps && back > half_eps)
                 {
                     node = tn->children[0];
                     continue;
                 }
-                if (front < -math::on_epsilon / 2 && back < -math::on_epsilon / 2)
+                if (front < -half_eps && back < -half_eps)
                 {
                     node = tn->children[1];
                     continue;
                 }
-                if (std::fabs(front) <= math::on_epsilon && std::fabs(back) <= math::on_epsilon)
+                if (std::fabs(front) <= eps && std::fabs(back) <= eps)
                 {
                     // rare: segment lies (almost) in the node plane; the
                     // recursive version visits both children with the full
                     // segment and solid beats sky here
+                    const vec3v curstart{sx, sy, sz};
+                    const vec3v curstop{ex, ey, ez};
                     int r1 = test_line_r(state, tn->children[0], curstart, curstop, linecontent, skyhit);
                     if (r1 == contents_solid)
                         return contents_solid;
@@ -229,32 +230,40 @@ namespace rad
                     break;
                 }
                 {
-                    int side = (front - back) < 0;
-                    float frac = front / (front - back);
-                    if (frac < 0)
-                        frac = 0;
-                    if (frac > 1)
-                        frac = 1;
-                    vec3v mid;
-                    mid[0] = curstart[0] + (curstop[0] - curstart[0]) * frac;
-                    mid[1] = curstart[1] + (curstop[1] - curstart[1]) * frac;
-                    mid[2] = curstart[2] + (curstop[2] - curstart[2]) * frac;
-                    if (top == stack + testline_stack_size)
+                    const float diff = front - back;
+                    const int side = diff < 0.0f;
+                    float frac = front / diff;
+                    if (frac < 0.0f)
+                        frac = 0.0f;
+                    if (frac > 1.0f)
+                        frac = 1.0f;
+                    const float mx = sx + (ex - sx) * frac;
+                    const float my = sy + (ey - sy) * frac;
+                    const float mz = sz + (ez - sz) * frac;
+                    if (depth == testline_stack_size)
                     {
                         // out of stack space (pathologically deep tree): finish recursively
+                        const vec3v curstart{sx, sy, sz};
+                        const vec3v mid{mx, my, mz};
                         int r = test_line_r(state, tn->children[side], curstart, mid, linecontent, skyhit);
                         if (r != contents_empty)
                             return r;
                         node = tn->children[!side];
-                        math::copy(mid, curstart);
+                        sx = mx;
+                        sy = my;
+                        sz = mz;
                         continue;
                     }
-                    top->node = tn->children[!side];
-                    math::copy(mid, top->start);
-                    math::copy(curstop, top->stop);
-                    top++;
+                    node_stack[depth] = tn->children[!side];
+                    vec3v &ps = point_stack[depth + 1];
+                    ps[0] = mx;
+                    ps[1] = my;
+                    ps[2] = mz;
+                    depth++;
                     node = tn->children[side];
-                    math::copy(mid, curstop);
+                    ex = mx;
+                    ey = my;
+                    ez = mz;
                 }
             }
 
@@ -270,9 +279,9 @@ namespace rad
                     {
                         if (skyhit)
                         {
-                            skyhit[0] = curstart[0];
-                            skyhit[1] = curstart[1];
-                            skyhit[2] = curstart[2];
+                            skyhit[0] = sx;
+                            skyhit[1] = sy;
+                            skyhit[2] = sz;
                         }
                         return contents_sky;
                     }
@@ -284,14 +293,20 @@ namespace rad
                 }
             }
 
-            if (top == stack)
+            if (depth == 0)
             {
                 return contents_empty;
             }
-            top--;
-            node = top->node;
-            math::copy(top->start, curstart);
-            math::copy(top->stop, curstop);
+            depth--;
+            node = node_stack[depth];
+            const vec3v &pstart = point_stack[depth + 1];
+            const vec3v &pstop = point_stack[depth];
+            sx = pstart[0];
+            sy = pstart[1];
+            sz = pstart[2];
+            ex = pstop[0];
+            ey = pstop[1];
+            ez = pstop[2];
         }
     }
 

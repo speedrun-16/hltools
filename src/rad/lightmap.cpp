@@ -854,9 +854,34 @@ namespace rad
             samplefrag *head;
         };
 
-        // fills winding, windingplane, mywinding, mywindingplane, numedges, edges
-        void chop_frag(const rad_state &state, samplefrag *frag)
+        struct samplefrag_slot
         {
+            samplefrag frag;
+            math::winding winding;
+            math::winding mywinding;
+            std::vector<samplefragedge> edges;
+        };
+
+        struct samplefrag_arena
+        {
+            samplefraginfo info;
+            std::vector<samplefrag_slot> slots;
+            int used = 0;
+
+            void reset(int maxsize)
+            {
+                if ((int)slots.size() < maxsize + 1)
+                    slots.resize((size_t)maxsize + 1);
+                used = 0;
+            }
+        };
+
+        thread_local samplefrag_arena tls_frag_arena;
+
+        // fills winding, windingplane, mywinding, mywindingplane, numedges, edges
+        void chop_frag(const rad_state &state, samplefrag_slot &slot, bool is_root)
+        {
+            samplefrag *frag = &slot.frag;
             // get the shape of the fragment by clipping the face using the boundaries
             const format::dface_t *f;
             const vec3v v_up = {0, 0, 1};
@@ -875,7 +900,9 @@ namespace rad
                 ff = &local;
             }
 
-            frag->mywinding = new math::winding(ff->texwinding);
+            slot.mywinding = ff->texwinding;
+            frag->mywinding = &slot.mywinding;
+            frag->winding = &slot.winding;
             // the same as applying the worldtotex matrix to the faceplane
             math::copy(v_up, frag->mywindingplane.normal);
             if (ff->flipped)
@@ -889,153 +916,182 @@ namespace rad
                 frag->mywinding->clip_in_place(frag->myrect.planes[x].normal, frag->myrect.planes[x].dist, false);
             }
 
+            frag->numedges = 0;
+            frag->edges = nullptr;
+            if (frag->mywinding->size() == 0)
             {
-                std::vector<vec3v> pts((size_t)frag->mywinding->size());
-                for (int x = 0; x < frag->mywinding->size(); x++)
-                {
-                    apply_matrix(frag->mycoordtocoord, (*frag->mywinding)[x], pts[(size_t)x]);
-                }
-                frag->winding = new math::winding{std::move(pts)};
+                slot.winding.mutable_points().clear();
+                return;
             }
-            frag->winding->remove_colinear_points();
+
             math::copy(frag->mywindingplane.normal, frag->windingplane.normal);
-            if (calc_matrix_sign(frag->mycoordtocoord) < 0.0)
+            if (!is_root && calc_matrix_sign(frag->mycoordtocoord) < 0.0)
             {
                 frag->windingplane.normal[2] *= -1;
             }
             frag->windingplane.dist = 0.0;
 
             // find the edges where the fragment can grow in the future
-            frag->numedges = 0;
-            frag->edges = (samplefragedge *)malloc((size_t)f->numedges * sizeof(samplefragedge));
-            err::require(frag->edges != nullptr, "chop_frag: out of memory");
-            for (int i = 0; i < f->numedges; i++)
+            const size_t smooth_count = ff->smooth_edges.size();
+            if (smooth_count > 0)
             {
-                samplefragedge *e;
-                const edgeshare *es;
-                vec_t frac1, frac2;
-                vec_t edgelen;
-                vec_t dot, dot1, dot2;
-                vec3v v, normal;
-                const matrix *m;
-                const matrix *m_inverse;
-
-                e = &frag->edges[frag->numedges];
-
-                // some basic info
-                e->edgenum = abs(map.surfedges[(size_t)(f->firstedge + i)]);
-                e->edgeside = (map.surfedges[(size_t)(f->firstedge + i)] < 0 ? 1 : 0);
-                es = &state.edgeshares[(size_t)e->edgenum];
-                if (!es->smooth)
+                if (slot.edges.size() < smooth_count)
+                    slot.edges.resize(smooth_count);
+                frag->edges = slot.edges.data();
+                for (size_t si = 0; si < smooth_count; si++)
                 {
-                    continue;
-                }
-                if ((int)(es->faces[e->edgeside] - map.faces.data()) != frag->facenum)
-                {
-                    err::fatal("internal error 1 in GrowSingleSampleFrag");
-                }
-                m = &es->textotex[e->edgeside];
-                m_inverse = &es->textotex[1 - e->edgeside];
-                e->nextfacenum = (int)(es->faces[1 - e->edgeside] - map.faces.data());
-                if (e->nextfacenum == frag->facenum)
-                {
-                    continue; // an invalid edge (usually very short)
-                }
-                e->tried = false; // because the frag hasn't been linked into the list yet
+                    const int i = ff->smooth_edges[si];
+                    samplefragedge *e;
+                    const edgeshare *es;
+                    vec_t frac1, frac2;
+                    vec_t edgelen;
+                    vec_t dot, dot1, dot2;
+                    vec3v v, normal;
+                    const matrix *m;
+                    const matrix *m_inverse;
 
-                // translate the edge points from world to the texture plane of
-                // the original frag, so the distances are comparable among
-                // edges from different frags
-                apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2], e->point1);
-                e->point1[2] = 0.0;
-                apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2 + 1], e->point2);
-                e->point2[2] = 0.0;
-                math::subtract(e->point2, e->point1, e->direction);
-                edgelen = math::normalize(e->direction);
-                if (edgelen <= math::on_epsilon)
-                {
-                    continue;
-                }
+                    e = &frag->edges[frag->numedges];
 
-                // clip the edge
-                frac1 = 0;
-                frac2 = 1;
-                for (int x = 0; x < 4; x++)
-                {
-                    vec_t d1;
-                    vec_t d2;
-
-                    d1 = math::dot(e->point1, frag->rect.planes[x].normal) - frag->rect.planes[x].dist;
-                    d2 = math::dot(e->point2, frag->rect.planes[x].normal) - frag->rect.planes[x].dist;
-                    if (d1 <= math::on_epsilon && d2 <= math::on_epsilon)
+                    // some basic info
+                    const int se = map.surfedges[(size_t)(f->firstedge + i)];
+                    e->edgenum = abs(se);
+                    e->edgeside = (se < 0 ? 1 : 0);
+                    es = &state.edgeshares[(size_t)e->edgenum];
+                    if ((int)(es->faces[e->edgeside] - map.faces.data()) != frag->facenum)
                     {
-                        frac1 = 1;
-                        frac2 = 0;
+                        err::fatal("internal error 1 in GrowSingleSampleFrag");
                     }
-                    else if (d1 < 0)
+                    m = &es->textotex[e->edgeside];
+                    m_inverse = &es->textotex[1 - e->edgeside];
+                    e->nextfacenum = (int)(es->faces[1 - e->edgeside] - map.faces.data());
+                    if (e->nextfacenum == frag->facenum)
                     {
-                        vec_t f1 = d1 / (d1 - d2);
-                        frac1 = frac1 > f1 ? frac1 : f1;
+                        continue; // an invalid edge (usually very short)
                     }
-                    else if (d2 < 0)
+                    e->tried = false; // because the frag hasn't been linked into the list yet
+
+                    // translate the edge points from world to the texture plane of
+                    // the original frag, so the distances are comparable among
+                    // edges from different frags
+                    if (is_root)
                     {
-                        vec_t f2 = d1 / (d1 - d2);
-                        frac2 = frac2 < f2 ? frac2 : f2;
+                        math::copy(ff->edgetex[(size_t)i * 2], e->point1);
+                        math::copy(ff->edgetex[(size_t)i * 2 + 1], e->point2);
                     }
-                }
-                if (edgelen * (frac2 - frac1) <= math::on_epsilon)
-                {
-                    continue;
-                }
-                math::multiply_add(e->point1, edgelen * frac2, e->direction, e->point2);
-                math::multiply_add(e->point1, edgelen * frac1, e->direction, e->point1);
+                    else
+                    {
+                        apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2], e->point1);
+                        apply_matrix(frag->mycoordtocoord, ff->edgetex[(size_t)i * 2 + 1], e->point2);
+                    }
+                    e->point1[2] = 0.0;
+                    e->point2[2] = 0.0;
+                    math::subtract(e->point2, e->point1, e->direction);
+                    edgelen = math::normalize(e->direction);
+                    if (edgelen <= math::on_epsilon)
+                    {
+                        continue;
+                    }
 
-                // calculate the distance etc which determine its priority
-                e->noseam = frag->noseam;
-                dot = math::dot(frag->origin, e->direction);
-                dot1 = math::dot(e->point1, e->direction);
-                dot2 = math::dot(e->point2, e->direction);
-                dot = dot < dot2 ? dot : dot2;
-                dot = dot1 > dot ? dot1 : dot;
-                math::multiply_add(e->point1, dot - dot1, e->direction, v);
-                math::subtract(v, frag->origin, v);
-                e->distance = (vec_t)math::length(v);
-                math::cross(e->direction, frag->windingplane.normal, normal);
-                math::normalize(normal); // points inward
-                e->distancereduction = math::dot(v, normal);
-                e->flippedangle = (vec_t)(frag->flippedangle + std::acos(es->cos_normals_angle < 1.0 ? (double)es->cos_normals_angle : 1.0));
+                    // clip the edge
+                    frac1 = 0;
+                    frac2 = 1;
+                    for (int x = 0; x < 4; x++)
+                    {
+                        vec_t d1;
+                        vec_t d2;
 
-                // calculate the matrix
-                e->ratio = (*m_inverse).v[2][2];
-                if (e->ratio <= math::normal_epsilon || (1 / e->ratio) <= math::normal_epsilon)
-                {
-                    continue;
-                }
+                        d1 = math::dot(e->point1, frag->rect.planes[x].normal) - frag->rect.planes[x].dist;
+                        d2 = math::dot(e->point2, frag->rect.planes[x].normal) - frag->rect.planes[x].dist;
+                        if (d1 <= math::on_epsilon && d2 <= math::on_epsilon)
+                        {
+                            frac1 = 1;
+                            frac2 = 0;
+                        }
+                        else if (d1 < 0)
+                        {
+                            vec_t f1 = d1 / (d1 - d2);
+                            frac1 = frac1 > f1 ? frac1 : f1;
+                        }
+                        else if (d2 < 0)
+                        {
+                            vec_t f2 = d1 / (d1 - d2);
+                            frac2 = frac2 < f2 ? frac2 : f2;
+                        }
+                    }
+                    if (edgelen * (frac2 - frac1) <= math::on_epsilon)
+                    {
+                        continue;
+                    }
+                    math::multiply_add(e->point1, edgelen * frac2, e->direction, e->point2);
+                    math::multiply_add(e->point1, edgelen * frac1, e->direction, e->point1);
 
-                if (std::fabs(e->ratio - 1) < 0.005)
-                {
-                    e->prevtonext = *m;
-                    e->nexttoprev = *m_inverse;
-                }
-                else
-                {
-                    e->noseam = false;
-                    e->prevtonext = *m;
-                    e->nexttoprev = *m_inverse;
-                }
+                    // calculate the distance etc which determine its priority
+                    e->noseam = frag->noseam;
+                    dot = math::dot(frag->origin, e->direction);
+                    dot1 = math::dot(e->point1, e->direction);
+                    dot2 = math::dot(e->point2, e->direction);
+                    dot = dot < dot2 ? dot : dot2;
+                    dot = dot1 > dot ? dot1 : dot;
+                    math::multiply_add(e->point1, dot - dot1, e->direction, v);
+                    math::subtract(v, frag->origin, v);
+                    e->distance = (vec_t)math::length(v);
+                    math::cross(e->direction, frag->windingplane.normal, normal);
+                    math::normalize(normal); // points inward
+                    e->distancereduction = math::dot(v, normal);
+                    e->flippedangle = (vec_t)(frag->flippedangle + std::acos(es->cos_normals_angle < 1.0 ? (double)es->cos_normals_angle : 1.0));
 
-                frag->numedges++;
+                    // calculate the matrix
+                    e->ratio = (*m_inverse).v[2][2];
+                    if (e->ratio <= math::normal_epsilon || (1 / e->ratio) <= math::normal_epsilon)
+                    {
+                        continue;
+                    }
+
+                    if (std::fabs(e->ratio - 1) < 0.005)
+                    {
+                        e->prevtonext = *m;
+                        e->nexttoprev = *m_inverse;
+                    }
+                    else
+                    {
+                        e->noseam = false;
+                        e->prevtonext = *m;
+                        e->nexttoprev = *m_inverse;
+                    }
+
+                    frag->numedges++;
+                }
+            }
+
+            // frag->winding is only needed for overlap tests when growing across
+            // smooth edges. For a root fragment with no candidate edges, no growth
+            // can occur and mycoordtocoord is identity, so skip the copy.
+            if (is_root)
+            {
+                if (frag->numedges > 0)
+                {
+                    slot.winding = slot.mywinding;
+                    slot.winding.remove_colinear_points();
+                }
+            }
+            else
+            {
+                std::vector<vec3v> &pts = slot.winding.mutable_points();
+                pts.resize((size_t)frag->mywinding->size());
+                for (int x = 0; x < frag->mywinding->size(); x++)
+                {
+                    apply_matrix(frag->mycoordtocoord, (*frag->mywinding)[x], pts[(size_t)x]);
+                }
+                slot.winding.remove_colinear_points();
             }
         }
 
         samplefrag *grow_single_frag(const rad_state &state, const samplefraginfo *info, samplefrag *parent, samplefragedge *edge)
         {
-            samplefrag *frag;
+            samplefrag_slot &slot = tls_frag_arena.slots[(size_t)tls_frag_arena.used];
+            samplefrag *frag = &slot.frag;
             bool overlap;
             int numclipplanes;
-
-            frag = (samplefrag *)malloc(sizeof(samplefrag));
-            err::require(frag != nullptr, "grow_single_frag: out of memory");
 
             // some basic info
             frag->next = nullptr;
@@ -1066,7 +1122,6 @@ namespace rad
                 double len = math::length(frag->myrect.planes[x].normal);
                 if (!len)
                 {
-                    free(frag);
                     return nullptr;
                 }
                 math::scale(frag->myrect.planes[x].normal, 1 / len, frag->myrect.planes[x].normal);
@@ -1074,15 +1129,10 @@ namespace rad
             }
 
             // chop windings and edges
-            chop_frag(state, frag);
+            chop_frag(state, slot, false);
 
             if (frag->winding->size() == 0 || frag->mywinding->size() == 0)
             {
-                // empty
-                delete frag->mywinding;
-                delete frag->winding;
-                free(frag->edges);
-                free(frag);
                 return nullptr;
             }
 
@@ -1120,13 +1170,10 @@ namespace rad
             {
                 // in the original texture plane, this fragment overlaps some
                 // existing fragments
-                delete frag->mywinding;
-                delete frag->winding;
-                free(frag->edges);
-                free(frag);
                 return nullptr;
             }
 
+            tls_frag_arena.used++;
             return frag;
         }
 
@@ -1189,16 +1236,16 @@ namespace rad
         samplefraginfo *create_sample_frag(const rad_state &state, int facenum, vec_t s, vec_t t,
                                            const vec_t square[2][2], int maxsize)
         {
-            samplefraginfo *info;
             const vec3v v_s = {1, 0, 0};
             const vec3v v_t = {0, 1, 0};
 
-            info = (samplefraginfo *)malloc(sizeof(samplefraginfo));
-            err::require(info != nullptr, "create_sample_frag: out of memory");
+            tls_frag_arena.reset(maxsize);
+            samplefraginfo *info = &tls_frag_arena.info;
             info->maxsize = maxsize;
             info->size = 1;
-            info->head = (samplefrag *)malloc(sizeof(samplefrag));
-            err::require(info->head != nullptr, "create_sample_frag: out of memory");
+            samplefrag_slot &root_slot = tls_frag_arena.slots[0];
+            tls_frag_arena.used = 1;
+            info->head = &root_slot.frag;
 
             info->head->next = nullptr;
             info->head->parentfrag = nullptr;
@@ -1226,27 +1273,27 @@ namespace rad
             info->head->rect.planes[3].dist = -square[1][1]; // tmax
             info->head->myrect = info->head->rect;
 
-            chop_frag(state, info->head);
+            chop_frag(state, root_slot, true);
 
-            if (info->head->winding->size() == 0 || info->head->mywinding->size() == 0)
+            if (info->head->mywinding->size() == 0
+                || (info->head->numedges > 0 && info->head->winding->size() == 0))
             {
                 // empty
-                delete info->head->mywinding;
-                delete info->head->winding;
-                free(info->head->edges);
-                free(info->head);
                 info->head = nullptr;
                 info->size = 0;
+                return info;
             }
-            else
+            if (info->head->numedges == 0)
             {
-                // prune edges
-                for (samplefragedge *e = info->head->edges; e < info->head->edges + info->head->numedges; e++)
+                return info;
+            }
+
+            // prune edges
+            for (samplefragedge *e = info->head->edges; e < info->head->edges + info->head->numedges; e++)
+            {
+                if (e->nextfacenum == info->head->facenum)
                 {
-                    if (e->nextfacenum == info->head->facenum)
-                    {
-                        e->tried = true;
-                    }
+                    e->tried = true;
                 }
             }
 
@@ -1298,18 +1345,8 @@ namespace rad
 
         void delete_sample_frag(samplefraginfo *fraginfo)
         {
-            while (fraginfo->head)
-            {
-                samplefrag *f;
-
-                f = fraginfo->head;
-                fraginfo->head = f->next;
-                delete f->mywinding;
-                delete f->winding;
-                free(f->edges);
-                free(f);
-            }
-            free(fraginfo);
+            fraginfo->head = nullptr;
+            fraginfo->size = 0;
         }
 
         light_flag set_sample_from_st(rad_state &state, vec3v &point, vec3v &position, int *surface,
@@ -1388,13 +1425,27 @@ namespace rad
 
             if (found)
             {
-                matrix worldtotex, textoworld;
+                matrix textoworld;
                 vec3v tex;
 
-                translate_world_to_tex(state, bestfrag->facenum, worldtotex);
-                if (!invert_matrix(worldtotex, textoworld))
+                if ((size_t)bestfrag->facenum < state.frag_faces.size()
+                    && state.frag_faces[(size_t)bestfrag->facenum].valid)
                 {
-                    err::fatal("Malformed face (%d) normal", bestfrag->facenum);
+                    const frag_face &best_ff = state.frag_faces[(size_t)bestfrag->facenum];
+                    if (!best_ff.textoworld_valid)
+                    {
+                        err::fatal("Malformed face (%d) normal", bestfrag->facenum);
+                    }
+                    textoworld = best_ff.textoworld;
+                }
+                else
+                {
+                    matrix worldtotex;
+                    translate_world_to_tex(state, bestfrag->facenum, worldtotex);
+                    if (!invert_matrix(worldtotex, textoworld))
+                    {
+                        err::fatal("Malformed face (%d) normal", bestfrag->facenum);
+                    }
                 }
 
                 // point
@@ -2277,11 +2328,18 @@ namespace rad
             state.numskynormals[skylevel] = numpoints;
             state.skynormals[skylevel].resize((size_t)numpoints);
             state.skynormalsizes[skylevel].resize((size_t)numpoints);
+            const size_t padded = ((size_t)numpoints + 3u) & ~3u;
+            state.skynormals_x[skylevel].assign(padded, 0.0f);
+            state.skynormals_y[skylevel].assign(padded, 0.0f);
+            state.skynormals_z[skylevel].assign(padded, 0.0f);
             int j, k;
             for (j = 0; j < numpoints; j++)
             {
                 for (k = 0; k < 3; k++)
                     state.skynormals[skylevel][(size_t)j][k] = (vec_t)points[j][k];
+                state.skynormals_x[skylevel][(size_t)j] = (float)points[j][0];
+                state.skynormals_y[skylevel][(size_t)j] = (float)points[j][1];
+                state.skynormals_z[skylevel][(size_t)j] = (float)points[j][2];
                 state.skynormalsizes[skylevel][(size_t)j] = 0;
             }
             double totalsize = 0;
@@ -2430,7 +2488,8 @@ namespace rad
         // that can see it step selects normal (0) or topatch/fast (1) lights
         void gather_sample_light(rad_state &state, const vec3v &pos, const byte *const pvs,
                                  const vec3v &normal, vec3v *sample, byte *styles, int step,
-                                 int miptex, int texlightgap_surfacenum, int *cached_pvs_row = nullptr)
+                                 int miptex, int texlightgap_surfacenum, int *cached_pvs_row = nullptr,
+                                 const std::vector<int> *vis_lightleafs = nullptr)
         {
             if (state.gpu_gather_phase != 0)
             {
@@ -2501,11 +2560,15 @@ namespace rad
                 }
             };
 
-            for (int ileaf = 0; ileaf < (int)state.lightleafs.size(); ileaf++)
+            const int leaf_count = vis_lightleafs
+                ? (int)vis_lightleafs->size()
+                : (int)state.lightleafs.size();
+            for (int vidx = 0; vidx < leaf_count; vidx++)
             {
+                const int ileaf = vis_lightleafs ? (*vis_lightleafs)[(size_t)vidx] : vidx;
                 i = state.lightleafs[(size_t)ileaf].leafnum;
                 {
-                    if (i == 0 ? state.options.sky_lighting_fix : pvs[(i - 1) >> 3] & (1 << ((i - 1) & 7)))
+                    if (vis_lightleafs || (i == 0 ? state.options.sky_lighting_fix : pvs[(i - 1) >> 3] & (1 << ((i - 1) & 7))))
                     {
                         directlight *lend = state.lightarray.data() + state.lightleafs[(size_t)ileaf].firstlight + state.lightleafs[(size_t)ileaf].numlights;
                         for (l = state.lightarray.data() + state.lightleafs[(size_t)ileaf].firstlight; l < lend; l++)
@@ -2986,7 +3049,12 @@ namespace rad
             {
                 numtexwindings++;
             }
+            struct patch_st_bounds
+            {
+                vec_t smin, smax, tmin, tmax;
+            };
             std::vector<math::winding> texwindings((size_t)numtexwindings);
+            std::vector<patch_st_bounds> texbounds((size_t)numtexwindings);
 
             // translate world windings into windings in the s,t plane
             for (j = 0, pt = state.face_patches[(size_t)facenum]; j < numtexwindings; j++, pt = pt->next)
@@ -3002,33 +3070,57 @@ namespace rad
                 }
                 texwindings[(size_t)j] = math::winding{std::move(pts)};
                 texwindings[(size_t)j].remove_colinear_points();
+                patch_st_bounds b{bogus_range, -bogus_range, bogus_range, -bogus_range};
+                for (int x = 0; x < texwindings[(size_t)j].size(); x++)
+                {
+                    const vec3v &p = texwindings[(size_t)j][x];
+                    if (p[0] < b.smin)
+                        b.smin = p[0];
+                    if (p[0] > b.smax)
+                        b.smax = p[0];
+                    if (p[1] < b.tmin)
+                        b.tmin = p[1];
+                    if (p[1] > b.tmax)
+                        b.tmax = p[1];
+                }
+                texbounds[(size_t)j] = b;
             }
 
+            math::winding w;
             for (i = 0; i < l->numsurfpt; i++)
             {
                 // prepare clip planes
                 vec_t s_vec, t_vec;
                 s_vec = (vec_t)(l->texmins[0] * texture_step + (i % (l->texsize[0] + 1)) * texture_step);
                 t_vec = (vec_t)(l->texmins[1] * texture_step + (i / (l->texsize[0] + 1)) * texture_step);
+                const vec_t smin = (vec_t)(s_vec - 0.5 * texture_step);
+                const vec_t smax = (vec_t)(s_vec + 0.5 * texture_step);
+                const vec_t tmin = (vec_t)(t_vec - 0.5 * texture_step);
+                const vec_t tmax = (vec_t)(t_vec + 0.5 * texture_step);
 
                 plane clipplanes[4];
                 math::clear(clipplanes[0].normal);
                 clipplanes[0].normal[0] = 1;
-                clipplanes[0].dist = (vec_t)(s_vec - 0.5 * texture_step);
+                clipplanes[0].dist = smin;
                 math::clear(clipplanes[1].normal);
                 clipplanes[1].normal[0] = -1;
-                clipplanes[1].dist = (vec_t)(-(s_vec + 0.5 * texture_step));
+                clipplanes[1].dist = -smax;
                 math::clear(clipplanes[2].normal);
                 clipplanes[2].normal[1] = 1;
-                clipplanes[2].dist = (vec_t)(t_vec - 0.5 * texture_step);
+                clipplanes[2].dist = tmin;
                 math::clear(clipplanes[3].normal);
                 clipplanes[3].normal[1] = -1;
-                clipplanes[3].dist = (vec_t)(-(t_vec + 0.5 * texture_step));
+                clipplanes[3].dist = -tmax;
 
                 // clip each patch
                 for (j = 0, pt = state.face_patches[(size_t)facenum]; j < numtexwindings; j++, pt = pt->next)
                 {
-                    math::winding w = texwindings[(size_t)j];
+                    const patch_st_bounds &b = texbounds[(size_t)j];
+                    if (b.smax < smin || b.smin > smax || b.tmax < tmin || b.tmin > tmax)
+                    {
+                        continue;
+                    }
+                    w = texwindings[(size_t)j];
                     for (k = 0; k < 4; k++)
                     {
                         if (w.size())
@@ -3267,6 +3359,21 @@ namespace rad
 
     namespace
     {
+        void fill_visible_lightleafs(const rad_state &state, const byte *pvs, std::vector<int> &out)
+        {
+            out.clear();
+            const int n = (int)state.lightleafs.size();
+            const bool sky_fix = state.options.sky_lighting_fix;
+            for (int ileaf = 0; ileaf < n; ileaf++)
+            {
+                const int leafnum = state.lightleafs[(size_t)ileaf].leafnum;
+                if (leafnum == 0 ? sky_fix : (pvs[(leafnum - 1) >> 3] & (1 << ((leafnum - 1) & 7))))
+                {
+                    out.push_back(ileaf);
+                }
+            }
+        }
+
         void calc_lightmap(rad_state &state, lightinfo *l, byte *styles, bool collect_only)
         {
             int facenum;
@@ -3278,6 +3385,12 @@ namespace rad
             // Reuse the GPU lookup while each decompressed PVS row stays current.
             int gpu_pvs_row = -1;
             int gpu_pvs_row2 = -1;
+            const bool need_pvs = state.gpu_gather_phase != 2;
+            const bool cpu_gather = state.gpu_gather_phase == 0;
+            thread_local std::vector<int> vis_lightleafs;
+            thread_local std::vector<int> vis_lightleafs2;
+            const std::vector<int> *vis_ptr = cpu_gather ? &vis_lightleafs : nullptr;
+            const std::vector<int> *vis_ptr2 = cpu_gather ? &vis_lightleafs2 : nullptr;
 
             facenum = l->surfnum;
             if (!collect_only)
@@ -3391,12 +3504,39 @@ namespace rad
                         math::copy(pointnormal, l->lmcache_normal[i]);
                 }
                 // calculate visibility for the sample
+                if (collect_only)
+                {
+                    if (state.map->visibility.empty())
+                    {
+                        gpu_pvs_row = 0;
+                    }
+                    else
+                    {
+                        format::dleaf_t *leaf = point_in_leaf(state, spot);
+                        gpu_pvs_row = gpu_gather_pvs_row(state, (int)(leaf - state.map->leafs.data()));
+                    }
+                    if (l->translucent_b)
+                    {
+                        if (state.map->visibility.empty())
+                        {
+                            gpu_pvs_row2 = 0;
+                        }
+                        else
+                        {
+                            format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
+                            gpu_pvs_row2 = gpu_gather_pvs_row(state, (int)(leaf2 - state.map->leafs.data()));
+                        }
+                    }
+                }
+                else if (need_pvs)
                 {
                     if (state.map->visibility.empty())
                     {
                         if (i == 0)
                         {
                             memset(pvs, 255, (size_t)((state.map->models[0].visleafs + 7) / 8));
+                            if (cpu_gather)
+                                fill_visible_lightleafs(state, pvs, vis_lightleafs);
                         }
                     }
                     else
@@ -3414,6 +3554,8 @@ namespace rad
                             {
                                 decompress_vis(state, &state.map->visibility[(size_t)leaf->visofs], pvs, sizeof(pvs));
                             }
+                            if (cpu_gather)
+                                fill_visible_lightleafs(state, pvs, vis_lightleafs);
                         }
                         lastoffset = thisoffset;
                     }
@@ -3424,6 +3566,8 @@ namespace rad
                             if (i == 0)
                             {
                                 memset(pvs2, 255, (size_t)((state.map->models[0].visleafs + 7) / 8));
+                                if (cpu_gather)
+                                    fill_visible_lightleafs(state, pvs2, vis_lightleafs2);
                             }
                         }
                         else
@@ -3441,6 +3585,8 @@ namespace rad
                                 {
                                     decompress_vis(state, &state.map->visibility[(size_t)leaf2->visofs], pvs2, sizeof(pvs2));
                                 }
+                                if (cpu_gather)
+                                    fill_visible_lightleafs(state, pvs2, vis_lightleafs2);
                             }
                             lastoffset2 = thisoffset2;
                         }
@@ -3451,7 +3597,7 @@ namespace rad
                     if (!blocked)
                     {
                         gather_sample_light(state, spot, pvs, pointnormal, sampled, styles, 0,
-                                            l->miptex, surface, &gpu_pvs_row);
+                                            l->miptex, surface, &gpu_pvs_row, vis_ptr);
                     }
                     if (l->translucent_b)
                     {
@@ -3460,7 +3606,7 @@ namespace rad
                         if (!blocked)
                         {
                             gather_sample_light(state, spot2, pvs2, pointnormal2, sampled2, styles, 0,
-                                                l->miptex, surface, &gpu_pvs_row2);
+                                                l->miptex, surface, &gpu_pvs_row2, vis_ptr2);
                         }
                         for (j = 0; !collect_only && j < allstyles && styles[j] != 255; j++)
                         {
@@ -3520,58 +3666,112 @@ namespace rad
             vec3v spot2, normal2;
             byte pvs2[(limits::max_map_leafs + 7) / 8];
             int thisoffset2 = -1, lastoffset2 = -1;
+            int gpu_pvs_row = -1;
+            int gpu_pvs_row2 = -1;
+            const bool need_pvs = state.gpu_gather_phase != 2;
+            const bool cpu_gather = state.gpu_gather_phase == 0;
+            thread_local std::vector<int> vis_lightleafs;
+            thread_local std::vector<int> vis_lightleafs2;
+            const std::vector<int> *vis_ptr = cpu_gather ? &vis_lightleafs : nullptr;
+            const std::vector<int> *vis_ptr2 = cpu_gather ? &vis_lightleafs2 : nullptr;
 
             for (patch *pt = first_patch; pt; pt = pt->next)
             {
                 // get the pvs for the pos to limit the number of checks
-                if (state.map->visibility.empty())
-                {
-                    memset(pvs, 255, (size_t)((map.models[0].visleafs + 7) / 8));
-                    lastoffset = -1;
-                }
-                else
-                {
-                    format::dleaf_t *leaf = point_in_leaf(state, pt->origin);
-
-                    thisoffset = leaf->visofs;
-                    if (pt == first_patch || thisoffset != lastoffset)
-                    {
-                        if (thisoffset == -1)
-                        {
-                            memset(pvs, 0, (size_t)((map.models[0].visleafs + 7) / 8));
-                        }
-                        else
-                        {
-                            decompress_vis(state, &state.map->visibility[(size_t)leaf->visofs], pvs, sizeof(pvs));
-                        }
-                    }
-                    lastoffset = thisoffset;
-                }
-                if (l.translucent_b)
+                if (collect_only)
                 {
                     if (state.map->visibility.empty())
                     {
-                        memset(pvs2, 255, (size_t)((map.models[0].visleafs + 7) / 8));
-                        lastoffset2 = -1;
+                        gpu_pvs_row = 0;
                     }
                     else
                     {
-                        math::multiply_add(pt->origin, -(state.options.translucentdepth + 2 * patch_hunt_offset), l.facenormal, spot2);
-                        format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
-
-                        thisoffset2 = leaf2->visofs;
-                        if (pt == first_patch || thisoffset2 != lastoffset2)
+                        format::dleaf_t *leaf = point_in_leaf(state, pt->origin);
+                        gpu_pvs_row = gpu_gather_pvs_row(state, (int)(leaf - state.map->leafs.data()));
+                    }
+                }
+                else if (need_pvs)
+                {
+                    if (state.map->visibility.empty())
+                    {
+                        if (pt == first_patch)
                         {
-                            if (thisoffset2 == -1)
+                            memset(pvs, 255, (size_t)((map.models[0].visleafs + 7) / 8));
+                            if (cpu_gather)
+                                fill_visible_lightleafs(state, pvs, vis_lightleafs);
+                        }
+                        lastoffset = -1;
+                    }
+                    else
+                    {
+                        format::dleaf_t *leaf = point_in_leaf(state, pt->origin);
+
+                        thisoffset = leaf->visofs;
+                        if (pt == first_patch || thisoffset != lastoffset)
+                        {
+                            gpu_pvs_row = -1;
+                            if (thisoffset == -1)
                             {
-                                memset(pvs2, 0, (size_t)((map.models[0].visleafs + 7) / 8));
+                                memset(pvs, 0, (size_t)((map.models[0].visleafs + 7) / 8));
                             }
                             else
                             {
-                                decompress_vis(state, &state.map->visibility[(size_t)leaf2->visofs], pvs2, sizeof(pvs2));
+                                decompress_vis(state, &state.map->visibility[(size_t)leaf->visofs], pvs, sizeof(pvs));
                             }
+                            if (cpu_gather)
+                                fill_visible_lightleafs(state, pvs, vis_lightleafs);
                         }
-                        lastoffset2 = thisoffset2;
+                        lastoffset = thisoffset;
+                    }
+                }
+                if (l.translucent_b)
+                {
+                    math::multiply_add(pt->origin, -(state.options.translucentdepth + 2 * patch_hunt_offset), l.facenormal, spot2);
+                    if (collect_only)
+                    {
+                        if (state.map->visibility.empty())
+                        {
+                            gpu_pvs_row2 = 0;
+                        }
+                        else
+                        {
+                            format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
+                            gpu_pvs_row2 = gpu_gather_pvs_row(state, (int)(leaf2 - state.map->leafs.data()));
+                        }
+                    }
+                    else if (need_pvs)
+                    {
+                        if (state.map->visibility.empty())
+                        {
+                            if (pt == first_patch)
+                            {
+                                memset(pvs2, 255, (size_t)((map.models[0].visleafs + 7) / 8));
+                                if (cpu_gather)
+                                    fill_visible_lightleafs(state, pvs2, vis_lightleafs2);
+                            }
+                            lastoffset2 = -1;
+                        }
+                        else
+                        {
+                            format::dleaf_t *leaf2 = point_in_leaf(state, spot2);
+
+                            thisoffset2 = leaf2->visofs;
+                            if (pt == first_patch || thisoffset2 != lastoffset2)
+                            {
+                                gpu_pvs_row2 = -1;
+                                if (thisoffset2 == -1)
+                                {
+                                    memset(pvs2, 0, (size_t)((map.models[0].visleafs + 7) / 8));
+                                }
+                                else
+                                {
+                                    decompress_vis(state, &state.map->visibility[(size_t)leaf2->visofs], pvs2, sizeof(pvs2));
+                                }
+                                if (cpu_gather)
+                                    fill_visible_lightleafs(state, pvs2, vis_lightleafs2);
+                            }
+                            lastoffset2 = thisoffset2;
+                        }
                     }
                     vec3v frontsampled[allstyles], backsampled[allstyles];
                     for (int j = 0; j < allstyles; j++)
@@ -3582,9 +3782,9 @@ namespace rad
                     for (int x = 0; x < 3; x++)
                         normal2[x] = 0.0f - l.facenormal[x];
                     gather_sample_light(state, pt->origin, pvs, l.facenormal, frontsampled,
-                                        pt->totalstyle_all, 1, l.miptex, facenum);
+                                        pt->totalstyle_all, 1, l.miptex, facenum, &gpu_pvs_row, vis_ptr);
                     gather_sample_light(state, spot2, pvs2, normal2, backsampled,
-                                        pt->totalstyle_all, 1, l.miptex, facenum);
+                                        pt->totalstyle_all, 1, l.miptex, facenum, &gpu_pvs_row2, vis_ptr2);
                     if (collect_only)
                         continue;
                     for (int j = 0; j < allstyles && pt->totalstyle_all[j] != 255; j++)
@@ -3599,7 +3799,8 @@ namespace rad
                 else
                 {
                     gather_sample_light(state, pt->origin, pvs, l.facenormal,
-                                        pt->totallight_all, pt->totalstyle_all, 1, l.miptex, facenum);
+                                        pt->totallight_all, pt->totalstyle_all, 1, l.miptex, facenum,
+                                        &gpu_pvs_row, vis_ptr);
                 }
             }
         }

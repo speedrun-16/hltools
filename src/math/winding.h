@@ -49,6 +49,9 @@ namespace math
         const std::vector<vec3<T>> &points() const {
             return points_;
         }
+        std::vector<vec3<T>> &mutable_points() {
+            return points_;
+        }
         void add_point(const vec3<T> &p) {
             points_.push_back(p);
         }
