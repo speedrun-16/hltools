@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <malloc.h> // alloca
 #include <memory>
 #include <vector>
 
@@ -463,12 +462,11 @@ namespace vis
                 if (!stack.pass)
                     continue;
 
-                stack.source = chop_winding(prevstack->source, &stack, &backplane);
-                if (!stack.source)
-                    continue;
-
                 if (!prevstack->pass)
                 {
+                    stack.source = chop_winding(prevstack->source, &stack, &backplane);
+                    if (!stack.source)
+                        continue;
                     recursive_leaf_flow(state, p->leaf, thread, &stack, depth + 1);
                     continue;
                 }
@@ -477,21 +475,29 @@ namespace vis
                 if (!stack.pass)
                     continue;
 
+                if (stack.clip_plane_count > 0)
+                {
+                    for (unsigned j = 0; j < (unsigned)stack.clip_plane_count && stack.pass != nullptr; j++)
+                        stack.pass = chop_winding(stack.pass, &stack, &stack.clip_plane[j]);
+                    if (stack.pass == nullptr)
+                        continue;
+                }
+
+                stack.source = chop_winding(prevstack->source, &stack, &backplane);
+                if (!stack.source)
+                    continue;
+
                 if (stack.clip_plane_count == -1)
                 {
-                    // stack allocation like the reference: this is the hottest
-                    // recursion in vis and must not touch the heap runs at
-                    // most once per recursion frame
                     stack.clip_plane_count = 0;
-                    stack.clip_plane = (plane *)alloca(
-                        sizeof(plane) * prevstack->source->numpoints * prevstack->pass->numpoints);
+                    const size_t needed = (size_t)prevstack->source->numpoints * (size_t)prevstack->pass->numpoints;
+                    if (stack.clip_plane_buf.size() < needed)
+                        stack.clip_plane_buf.resize(needed);
+                    stack.clip_plane = stack.clip_plane_buf.data();
 
                     clip_to_separators(prevstack->source, prevstack->pass, nullptr, false, &stack);
                     clip_to_separators(prevstack->pass, prevstack->source, nullptr, true, &stack);
-                }
 
-                if (stack.clip_plane_count > 0)
-                {
                     for (unsigned j = 0; j < (unsigned)stack.clip_plane_count && stack.pass != nullptr; j++)
                         stack.pass = chop_winding(stack.pass, &stack, &stack.clip_plane[j]);
                     if (stack.pass == nullptr)
@@ -542,7 +548,6 @@ namespace vis
         p->visbits = (byte *)std::calloc(1, state.bitbytes);
 
         thread_data data;
-        std::memset(&data, 0, sizeof(data));
         data.leafvis = p->visbits;
         data.base = p;
 

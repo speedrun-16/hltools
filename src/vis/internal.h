@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -31,15 +30,14 @@ namespace vis
         done,
     };
 
-    struct winding
+    struct alignas(16) winding
     {
-        bool original = false;
-        int numpoints = 0;
-        math::vec3v points[max_points_on_winding] = {};
-
 #if HLTOOLS_VIS_SSE2
         alignas(16) float small_points[3][4] = {};
 #endif
+        int numpoints = 0;
+        bool original = false;
+        math::vec3v points[max_points_on_winding] = {};
 
         void pack_small_points()
         {
@@ -119,6 +117,7 @@ namespace vis
         const plane *portalplane = nullptr;
         int clip_plane_count = -1;
         plane *clip_plane = nullptr;
+        std::vector<plane> clip_plane_buf;
     };
 
     struct thread_data
@@ -152,8 +151,6 @@ namespace vis
         unsigned bitlongs = 0;
         int originalvismapsize = 0;
         int totalvis = 0;
-
-        std::mutex portal_mutex;
     };
 
     int compress_vis(const byte *src, unsigned src_length, byte *dest, unsigned dest_length);

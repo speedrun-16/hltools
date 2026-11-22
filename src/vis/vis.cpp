@@ -320,28 +320,6 @@ namespace vis
             }
         }
 
-        portal *get_next_portal(vis_state &state)
-        {
-            std::lock_guard<std::mutex> lock(state.portal_mutex);
-
-            int min = 99999;
-            portal *best = nullptr;
-            for (int j = 0; j < state.numportals * 2; j++)
-            {
-                portal *tp = state.portals.data() + j;
-                if ((int)tp->nummightsee < min && tp->status == portal_status::none)
-                {
-                    min = tp->nummightsee;
-                    best = tp;
-                }
-            }
-
-            if (best)
-                best->status = portal_status::working;
-            return best;
-        }
-
-
         void leaf_flow_neighbor_add_leaf(vis_state &state, int current, int add, int neighbor,
                                          std::unordered_map<int, bool> &exclude)
         {
@@ -453,17 +431,25 @@ namespace vis
                 return;
             }
 
-            // one portal per work item so the bar advances as portals finish
-            // (the old leaf_thread loop drained the whole queue inside the
-            // first few items, so the bar sat at 0% until the phase ended)
-            // scheduling is unchanged: every item still pulls the cheapest
-            // pending portal through get_next_portal
+            // pre-sort portals in exact get_next_portal order (ascending
+            // nummightsee, ties broken by original portal index) so workers
+            // claim the next portal via threads::run_phase's atomic index
+            // instead of scanning every portal under a mutex
+            const int total_portals = state.numportals * 2;
+            std::vector<portal *> order((size_t)total_portals);
+            for (int j = 0; j < total_portals; j++)
+                order[(size_t)j] = state.portals.data() + j;
+            std::stable_sort(order.begin(), order.end(), [](const portal *a, const portal *b) {
+                return a->nummightsee < b->nummightsee;
+            });
+
             threads::run_phase("computing visibility",
                                state.options.full ? "computing full visibility"
                                                   : "computing portal visibility",
-                               state.numportals * 2, [&](int) {
-                if (portal *p = get_next_portal(state))
-                    portal_flow(state, p);
+                               total_portals, [&](int idx) {
+                portal *p = order[(size_t)idx];
+                p->status = portal_status::working;
+                portal_flow(state, p);
             });
         }
 
