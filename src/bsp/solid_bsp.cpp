@@ -97,85 +97,130 @@ namespace bsp
             math::vec3v maxs;
             bool isleaf = false;
             // node
-            surface_tree_node *children[2] = {};
-            std::vector<face *> *nodefaces = nullptr;
+            int children[2] = {-1, -1};
+            int nodefaces = -1;
             int nodefaces_discardablesize = 0;
             // leaf
-            std::vector<face *> *leaffaces = nullptr;
+            int leaffaces = -1;
         };
 
         struct surface_tree
         {
             bool dontbuild = false;
             vec_t epsilon = 0; // faces closer than this to the plane land in middle
-            surface_tree_node *headnode = nullptr;
+            int headnode = -1;
+            int used_nodes = 0;
+            int used_lists = 0;
+            std::vector<surface_tree_node> nodes;
+            std::vector<std::vector<face *>> lists;
             struct
             {
                 int frontsize = 0;
                 int backsize = 0;
-                std::vector<face *> *middle = nullptr; // coplanar and discardable faces too
+                std::vector<face *> middle; // coplanar and discardable faces too
             } result;
+
+            int alloc_node()
+            {
+                int idx = used_nodes++;
+                if (idx >= (int)nodes.size())
+                    nodes.emplace_back();
+                else
+                    nodes[(size_t)idx] = surface_tree_node{};
+                return idx;
+            }
+
+            int alloc_list()
+            {
+                int idx = used_lists++;
+                if (idx >= (int)lists.size())
+                    lists.emplace_back();
+                else
+                    lists[(size_t)idx].clear();
+                return idx;
+            }
         };
 
-        void build_surface_tree_r(surface_tree *tree, surface_tree_node *node)
+        thread_local surface_tree tls_surface_tree;
+
+        void build_surface_tree_r(surface_tree *tree, int node_idx)
         {
-            node->size = (int)node->leaffaces->size();
-            node->size_discardable = 0;
-            if (node->size == 0)
+            const int leaf_list_idx = tree->nodes[(size_t)node_idx].leaffaces;
+            const int nsize = (int)tree->lists[(size_t)leaf_list_idx].size();
+            tree->nodes[(size_t)node_idx].size = nsize;
+            tree->nodes[(size_t)node_idx].size_discardable = 0;
+            if (nsize == 0)
             {
-                node->isleaf = true;
+                tree->nodes[(size_t)node_idx].isleaf = true;
                 return;
             }
 
-            node->mins.x = node->mins.y = node->mins.z = (vec_t)bogus_range;
-            node->maxs.x = node->maxs.y = node->maxs.z = (vec_t)-bogus_range;
-            for (face *f : *node->leaffaces)
+            math::vec3v mins{(vec_t)bogus_range, (vec_t)bogus_range, (vec_t)bogus_range};
+            math::vec3v maxs{(vec_t)-bogus_range, (vec_t)-bogus_range, (vec_t)-bogus_range};
+            int discardable = 0;
+            for (face *f : tree->lists[(size_t)leaf_list_idx])
             {
                 for (int x = 0; x < f->numpoints; x++)
                 {
                     for (int k = 0; k < 3; k++)
                     {
-                        if (f->pts[x][k] < node->mins[k])
-                            node->mins[k] = f->pts[x][k];
-                        if (f->pts[x][k] > node->maxs[k])
-                            node->maxs[k] = f->pts[x][k];
+                        if (f->pts[x][k] < mins[k])
+                            mins[k] = f->pts[x][k];
+                        if (f->pts[x][k] > maxs[k])
+                            maxs[k] = f->pts[x][k];
                     }
                 }
                 if (f->style == face_style::discardable)
-                    node->size_discardable++;
+                    discardable++;
             }
+            tree->nodes[(size_t)node_idx].mins = mins;
+            tree->nodes[(size_t)node_idx].maxs = maxs;
+            tree->nodes[(size_t)node_idx].size_discardable = discardable;
 
             int bestaxis = -1;
             {
                 vec_t bestdelta = 0;
                 for (int k = 0; k < 3; k++)
                 {
-                    if (node->maxs[k] - node->mins[k] > bestdelta + math::on_epsilon)
+                    if (maxs[k] - mins[k] > bestdelta + math::on_epsilon)
                     {
                         bestaxis = k;
-                        bestdelta = node->maxs[k] - node->mins[k];
+                        bestdelta = maxs[k] - mins[k];
                     }
                 }
             }
-            if (node->size <= 5 || tree->dontbuild || bestaxis == -1)
+            if (nsize <= 5 || tree->dontbuild || bestaxis == -1)
             {
-                node->isleaf = true;
+                tree->nodes[(size_t)node_idx].isleaf = true;
                 return;
             }
 
-            node->isleaf = false;
-            vec_t dist = (node->mins[bestaxis] + node->maxs[bestaxis]) / 2;
-            vec_t dist1 = (3 * node->mins[bestaxis] + node->maxs[bestaxis]) / 4;
-            vec_t dist2 = (node->mins[bestaxis] + 3 * node->maxs[bestaxis]) / 4;
+            tree->nodes[(size_t)node_idx].isleaf = false;
+            vec_t dist = (mins[bestaxis] + maxs[bestaxis]) / 2;
+            vec_t dist1 = (3 * mins[bestaxis] + maxs[bestaxis]) / 4;
+            vec_t dist2 = (mins[bestaxis] + 3 * maxs[bestaxis]) / 4;
             // each child is at most 3/4 the parent's size; faces left in the
             // parent are those comparable in size to the parent itself
-            node->nodefaces = new std::vector<face *>;
-            node->nodefaces_discardablesize = 0;
-            node->children[0] = new surface_tree_node();
-            node->children[0]->leaffaces = new std::vector<face *>;
-            node->children[1] = new surface_tree_node();
-            node->children[1]->leaffaces = new std::vector<face *>;
-            for (face *f : *node->leaffaces)
+            const int nodefaces_idx = tree->alloc_list();
+            const int child0_idx = tree->alloc_node();
+            const int child0_list = tree->alloc_list();
+            const int child1_idx = tree->alloc_node();
+            const int child1_list = tree->alloc_list();
+
+            tree->nodes[(size_t)node_idx].nodefaces = nodefaces_idx;
+            tree->nodes[(size_t)node_idx].nodefaces_discardablesize = 0;
+            tree->nodes[(size_t)node_idx].children[0] = child0_idx;
+            tree->nodes[(size_t)child0_idx].leaffaces = child0_list;
+            tree->nodes[(size_t)node_idx].children[1] = child1_idx;
+            tree->nodes[(size_t)child1_idx].leaffaces = child1_list;
+
+            auto &src = tree->lists[(size_t)leaf_list_idx];
+            auto &nf = tree->lists[(size_t)nodefaces_idx];
+            auto &c0 = tree->lists[(size_t)child0_list];
+            auto &c1 = tree->lists[(size_t)child1_list];
+            int nf_discard = 0;
+
+            for (face *f : src)
             {
                 vec_t low = (vec_t)bogus_range;
                 vec_t high = (vec_t)-bogus_range;
@@ -188,75 +233,77 @@ namespace bsp
                 }
                 if (low < dist1 + math::on_epsilon && high > dist2 - math::on_epsilon)
                 {
-                    node->nodefaces->push_back(f);
+                    nf.push_back(f);
                     if (f->style == face_style::discardable)
-                        node->nodefaces_discardablesize++;
+                        nf_discard++;
                 }
                 else if (low >= dist1 && high <= dist2)
                 {
                     if ((low + high) / 2 > dist)
-                        node->children[0]->leaffaces->push_back(f);
+                        c0.push_back(f);
                     else
-                        node->children[1]->leaffaces->push_back(f);
+                        c1.push_back(f);
                 }
                 else if (low >= dist1)
                 {
-                    node->children[0]->leaffaces->push_back(f);
+                    c0.push_back(f);
                 }
                 else if (high <= dist2)
                 {
-                    node->children[1]->leaffaces->push_back(f);
+                    c1.push_back(f);
                 }
             }
-            if (node->children[0]->leaffaces->size() == node->leaffaces->size()
-                || node->children[1]->leaffaces->size() == node->leaffaces->size())
+            tree->nodes[(size_t)node_idx].nodefaces_discardablesize = nf_discard;
+
+            if (c0.size() == src.size() || c1.size() == src.size())
             {
                 logging::warn("build_surface_tree_r: didn't split node with bound (%f,%f,%f)-(%f,%f,%f)",
-                              (double)node->mins[0], (double)node->mins[1], (double)node->mins[2],
-                              (double)node->maxs[0], (double)node->maxs[1], (double)node->maxs[2]);
-                delete node->children[0]->leaffaces;
-                delete node->children[1]->leaffaces;
-                delete node->children[0];
-                delete node->children[1];
-                delete node->nodefaces;
-                node->isleaf = true;
+                              (double)mins[0], (double)mins[1], (double)mins[2],
+                              (double)maxs[0], (double)maxs[1], (double)maxs[2]);
+                tree->nodes[(size_t)node_idx].children[0] = -1;
+                tree->nodes[(size_t)node_idx].children[1] = -1;
+                tree->nodes[(size_t)node_idx].nodefaces = -1;
+                tree->nodes[(size_t)node_idx].isleaf = true;
                 return;
             }
-            delete node->leaffaces;
-            node->leaffaces = nullptr;
-            build_surface_tree_r(tree, node->children[0]);
-            build_surface_tree_r(tree, node->children[1]);
+            tree->nodes[(size_t)node_idx].leaffaces = -1;
+            build_surface_tree_r(tree, child0_idx);
+            build_surface_tree_r(tree, child1_idx);
         }
 
         surface_tree *build_surface_tree(surface *surfaces, vec_t epsilon)
         {
-            surface_tree *tree = new surface_tree();
+            surface_tree *tree = &tls_surface_tree;
             tree->epsilon = epsilon;
-            tree->result.middle = new std::vector<face *>;
-            tree->headnode = new surface_tree_node();
-            tree->headnode->leaffaces = new std::vector<face *>;
+            tree->used_nodes = 0;
+            tree->used_lists = 0;
+            tree->result.middle.clear();
+            tree->headnode = tree->alloc_node();
+            const int head_list = tree->alloc_list();
+            tree->nodes[(size_t)tree->headnode].leaffaces = head_list;
+            auto &hf = tree->lists[(size_t)head_list];
             for (surface *p2 = surfaces; p2; p2 = p2->next)
             {
                 if (p2->onnode)
                     continue;
                 for (face *f = p2->faces; f; f = f->next)
-                    tree->headnode->leaffaces->push_back(f);
+                    hf.push_back(f);
             }
-            tree->dontbuild = tree->headnode->leaffaces->size() < 20;
+            tree->dontbuild = hf.size() < 20;
             build_surface_tree_r(tree, tree->headnode);
             if (tree->dontbuild)
             {
-                *tree->result.middle = *tree->headnode->leaffaces;
+                tree->result.middle = tree->lists[(size_t)tree->nodes[(size_t)tree->headnode].leaffaces];
                 tree->result.backsize = 0;
                 tree->result.frontsize = 0;
             }
             return tree;
         }
 
-        void test_surface_tree_r(surface_tree *tree, const surface_tree_node *node,
-                                 const plane *split)
+        void test_surface_tree_r(surface_tree *tree, int node_idx, const plane *split)
         {
-            if (node->size == 0)
+            const surface_tree_node &node = tree->nodes[(size_t)node_idx];
+            if (node.size == 0)
                 return;
             vec_t low, high;
             low = high = -split->dist;
@@ -264,38 +311,38 @@ namespace bsp
             {
                 if (split->normal[k] >= 0)
                 {
-                    high += split->normal[k] * node->maxs[k];
-                    low += split->normal[k] * node->mins[k];
+                    high += split->normal[k] * node.maxs[k];
+                    low += split->normal[k] * node.mins[k];
                 }
                 else
                 {
-                    high += split->normal[k] * node->mins[k];
-                    low += split->normal[k] * node->maxs[k];
+                    high += split->normal[k] * node.mins[k];
+                    low += split->normal[k] * node.maxs[k];
                 }
             }
             if (low > tree->epsilon)
             {
-                tree->result.frontsize += node->size;
-                tree->result.frontsize -= node->size_discardable;
+                tree->result.frontsize += node.size;
+                tree->result.frontsize -= node.size_discardable;
                 return;
             }
             if (high < -tree->epsilon)
             {
-                tree->result.backsize += node->size;
-                tree->result.backsize -= node->size_discardable;
+                tree->result.backsize += node.size;
+                tree->result.backsize -= node.size_discardable;
                 return;
             }
-            if (node->isleaf)
+            if (node.isleaf)
             {
-                for (face *f : *node->leaffaces)
-                    tree->result.middle->push_back(f);
+                const auto &lf = tree->lists[(size_t)node.leaffaces];
+                tree->result.middle.insert(tree->result.middle.end(), lf.begin(), lf.end());
             }
             else
             {
-                for (face *f : *node->nodefaces)
-                    tree->result.middle->push_back(f);
-                test_surface_tree_r(tree, node->children[0], split);
-                test_surface_tree_r(tree, node->children[1], split);
+                const auto &nf = tree->lists[(size_t)node.nodefaces];
+                tree->result.middle.insert(tree->result.middle.end(), nf.begin(), nf.end());
+                test_surface_tree_r(tree, node.children[0], split);
+                test_surface_tree_r(tree, node.children[1], split);
             }
         }
 
@@ -303,34 +350,15 @@ namespace bsp
         {
             if (tree->dontbuild)
                 return;
-            tree->result.middle->clear();
+            tree->result.middle.clear();
             tree->result.backsize = 0;
             tree->result.frontsize = 0;
             test_surface_tree_r(tree, tree->headnode, split);
         }
 
-        void delete_surface_tree_r(surface_tree_node *node)
+        void delete_surface_tree(surface_tree *)
         {
-            if (node->isleaf)
-            {
-                delete node->leaffaces;
-            }
-            else
-            {
-                delete_surface_tree_r(node->children[0]);
-                delete node->children[0];
-                delete_surface_tree_r(node->children[1]);
-                delete node->children[1];
-                delete node->nodefaces;
-            }
-        }
-
-        void delete_surface_tree(surface_tree *tree)
-        {
-            delete_surface_tree_r(tree->headnode);
-            delete tree->headnode;
-            delete tree->result.middle;
-            delete tree;
+            // Pooled in tls_surface_tree and reused across splits.
         }
 
         // when there are a huge number of planes, choose an axial one close to
@@ -375,7 +403,7 @@ namespace bsp
                 test_surface_tree(surfacetree, split);
                 frontcount += surfacetree->result.frontsize;
                 backcount += surfacetree->result.backsize;
-                for (face *f : *surfacetree->result.middle)
+                for (face *f : surfacetree->result.middle)
                 {
                     if (f->style == face_style::discardable)
                         continue;
@@ -428,9 +456,17 @@ namespace bsp
             (void)mins;
             (void)maxs;
 
+            struct plane_candidate
+            {
+                surface *surf;
+                double v0;
+                double v1;
+            };
+            thread_local std::vector<plane_candidate> candidates;
+            candidates.clear();
+
             double planecount = 0;
             double totalsplit = 0;
-            std::vector<double> tmpvalue(state.planes.size() * 2);
             surface_tree *surfacetree = build_surface_tree(surfaces, (vec_t)math::on_epsilon);
 
             vec_t bestvalue = 9e30;
@@ -461,7 +497,7 @@ namespace bsp
                 test_surface_tree(surfacetree, split);
                 frontcount += surfacetree->result.frontsize;
                 backcount += surfacetree->result.backsize;
-                for (face *f : *surfacetree->result.middle)
+                for (face *f : surfacetree->result.middle)
                 {
                     if (f->planenum == p->planenum || f->planenum == (p->planenum ^ 1))
                         continue;
@@ -495,24 +531,19 @@ namespace bsp
                     ? (-frac * std::log(frac) / std::log(2.0)
                        - (1 - frac) * std::log(1 - frac) / std::log(2.0))
                     : 0.0; // the formula tends to 0 when frac is 0 or 1
-                tmpvalue[(size_t)p->planenum * 2 + 1] = crosscount * (1 - ent);
+                double v1 = crosscount * (1 - ent);
                 value += epsilonsplit * 10000;
 
-                tmpvalue[(size_t)p->planenum * 2 + 0] = value;
+                candidates.push_back({p, value, v1});
             }
             double avesplit = totalsplit / planecount;
-            for (surface *p = surfaces; p; p = p->next)
+            for (const plane_candidate &cand : candidates)
             {
-                if (p->onnode)
-                    continue;
-                if (p->detail_level != detaillevel)
-                    continue;
-                vec_t value = tmpvalue[(size_t)p->planenum * 2 + 0]
-                    + avesplit * tmpvalue[(size_t)p->planenum * 2 + 1];
+                vec_t value = cand.v0 + avesplit * cand.v1;
                 if (value < bestvalue)
                 {
                     bestvalue = value;
-                    bestsurface = p;
+                    bestsurface = cand.surf;
                 }
             }
 

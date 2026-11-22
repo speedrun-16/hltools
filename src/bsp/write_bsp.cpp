@@ -6,10 +6,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <numeric>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include "../common/binary.h"
@@ -30,18 +30,36 @@ namespace bsp
     {
         constexpr int max_map_worldfaces = 32768;
 
-        using plane_map = std::map<int, int>;
-        using texinfo_map = std::map<int, int>;
-        using clipnode_key = std::pair<int, std::pair<int, int>>;
-        using clipnode_map = std::map<clipnode_key, int>;
+        struct clipnode_key
+        {
+            int planenum;
+            int child0;
+            int child1;
+            bool operator==(const clipnode_key &o) const
+            {
+                return planenum == o.planenum && child0 == o.child0 && child1 == o.child1;
+            }
+        };
+        struct clipnode_key_hash
+        {
+            size_t operator()(const clipnode_key &k) const noexcept
+            {
+                uint64_t h = (uint64_t)(uint32_t)k.planenum * 0x9e3779b97f4a7c15ull;
+                h ^= (uint64_t)(uint32_t)k.child0 * 0xbf58476d1ce4e5b9ull;
+                h ^= (uint64_t)(uint32_t)k.child1 * 0x94d049bb133111ebull;
+                h ^= h >> 31;
+                return (size_t)h;
+            }
+        };
+        using clipnode_map = std::unordered_map<clipnode_key, int, clipnode_key_hash>;
 
         // writer bookkeeping shared by all models of one run, like the
         // reference file statics; begin_bsp_file resets it
         struct writer_state
         {
-            plane_map planes_seen;
+            std::vector<int> planes_seen;
             std::vector<plane> mapped_planes;
-            texinfo_map texinfos_seen;
+            std::vector<int> texinfos_seen;
             std::vector<format::texinfo_t> mapped_texinfos;
             int count_mergedclipnodes = 0;
         };
@@ -50,7 +68,7 @@ namespace bsp
 
         clipnode_key make_clipnode_key(int planenum, int child0, int child1)
         {
-            return std::make_pair(planenum, std::make_pair(child0, child1));
+            return clipnode_key{planenum, child0, child1};
         }
 
         // hook for plane optimization: maps a used plane to its output slot
@@ -61,9 +79,9 @@ namespace bsp
             if (state.options.noopt)
                 return planenum;
 
-            plane_map::iterator item = g_writer.planes_seen.find(planenum);
-            if (item != g_writer.planes_seen.end())
-                return item->second;
+            const size_t idx = (size_t)(planenum >> 1);
+            if (idx < g_writer.planes_seen.size() && g_writer.planes_seen[idx] >= 0)
+                return g_writer.planes_seen[idx];
 
             if ((int)g_writer.mapped_planes.size() >= limits::max_map_planes)
             {
@@ -76,7 +94,9 @@ namespace bsp
             }
             g_writer.mapped_planes.push_back(state.planes[(size_t)planenum]);
             int out = (int)g_writer.mapped_planes.size() - 1;
-            g_writer.planes_seen.emplace(planenum, out);
+            if (idx >= g_writer.planes_seen.size())
+                g_writer.planes_seen.resize(idx + 1, -1);
+            g_writer.planes_seen[idx] = out;
             return out;
         }
 
@@ -88,13 +108,15 @@ namespace bsp
             if (state.options.noopt)
                 return texinfo;
 
-            texinfo_map::iterator it = g_writer.texinfos_seen.find(texinfo);
-            if (it != g_writer.texinfos_seen.end())
-                return it->second;
+            const size_t idx = (size_t)texinfo;
+            if (idx < g_writer.texinfos_seen.size() && g_writer.texinfos_seen[idx] >= 0)
+                return g_writer.texinfos_seen[idx];
 
             int c = (int)g_writer.mapped_texinfos.size();
-            g_writer.mapped_texinfos.push_back(state.map->texinfo[(size_t)texinfo]);
-            g_writer.texinfos_seen.emplace(texinfo, c);
+            g_writer.mapped_texinfos.push_back(state.map->texinfo[idx]);
+            if (idx >= g_writer.texinfos_seen.size())
+                g_writer.texinfos_seen.resize(idx + 1, -1);
+            g_writer.texinfos_seen[idx] = c;
             return c;
         }
 
