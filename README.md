@@ -46,17 +46,17 @@ xychart-beta
     title "speedrun_celerior compile time (lower is better)"
     x-axis ["RAD CPU", "RAD -gpu", "Compile CPU", "Compile -gpu"]
     y-axis "Wall time (seconds)" 0 --> 140
-    bar [120.79, 19.02, 136.79, 31.65]
+    bar [110.60, 13.85, 126.22, 28.40]
 ```
 
 | Stage | Path | Run 1 | Run 2 | Run 3 | Average |
 |---|---|---:|---:|---:|---:|
-| RAD only | CPU | 116.92 s | 122.32 s | 123.13 s | 120.79 s |
-| RAD only | `-gpu` | 19.34 s | 18.53 s | 19.18 s | 19.02 s |
-| Full compile | CPU | 138.43 s | 136.88 s | 135.06 s | 136.79 s |
-| Full compile | `-gpu` | 31.00 s | 31.63 s | 32.33 s | 31.65 s |
+| RAD only | CPU | 108.48 s | 115.50 s | 107.82 s | 110.60 s |
+| RAD only | `-gpu` | 14.48 s | 14.12 s | 12.94 s | 13.85 s |
+| Full compile | CPU | 120.35 s | 131.54 s | 126.78 s | 126.22 s |
+| Full compile | `-gpu` | 28.11 s | 26.93 s | 30.16 s | 28.40 s |
 
-On this map, `-gpu` is 6.35× faster and reduces RAD wall time by 84.3%, and it is 4.32× faster for the full compile, reducing its wall time by 76.9%.
+On this map, `-gpu` is 7.99× faster and reduces RAD wall time by 87.5%, and it is 4.44× faster for the full compile, reducing its wall time by 77.5%.
 
 ## Leak diagnostics
 
