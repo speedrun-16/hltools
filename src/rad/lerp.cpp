@@ -62,6 +62,15 @@ namespace rad
 
         std::vector<wedge> sortedwedges;         // in clockwise order (same as winding)
         std::vector<hull_point> sortedhullpoints; // in clockwise order (same as winding)
+        vec_t max_hull_dist_sq = 0;               // conservative reject bound for calc_weight
+    };
+
+    struct local_interp
+    {
+        bool isbiased;
+        vec_t totalweight;
+        int count;
+        interpolation::point points[4];
     };
 
     struct face_triangulation
@@ -86,9 +95,6 @@ namespace rad
         // distant point is removed or the triangle breaks into a convex wedge
         const double triangle_shape_threshold = 115.0 * math::pi / 180;
 
-        // if the surface formed by the face and its neighbors is not flat, it
-        // is unfolded onto the face plane; this maps a position on the surface
-        // to the unfolded spot relative to the center
         bool calc_adapted_spot(const rad_state &state, const local_triangulation *lt,
                                const vec3v &position, int surface, vec3v &spot)
         {
@@ -119,14 +125,11 @@ namespace rad
             dot = math::dot(surfacespot, lt->normal);
             math::multiply_add(surfacespot, -dot, lt->normal, spot);
 
-            // use the phong normal instead of the face normal, because the
-            // phong normal is a continuous function
             get_phong_normal(state, surface, position, phongnormal);
             dot = math::dot(spot, phongnormal);
             if (std::fabs(dot) > math::on_epsilon)
             {
                 frac = math::dot(surfacespot, phongnormal) / dot;
-                // correct some extreme cases
                 frac = frac < 1 ? frac : 1;
                 frac = 0 > frac ? 0 : frac;
             }
@@ -139,6 +142,53 @@ namespace rad
             dist = (vec_t)math::length(spot);
             math::subtract(surfacespot, middle, v);
             dist2 = (vec_t)(math::length(middle) + math::length(v));
+
+            if (dist > math::on_epsilon && std::fabs(dist2 - dist) > math::on_epsilon)
+            {
+                math::scale(spot, dist2 / dist, spot);
+            }
+            return true;
+        }
+
+        // if the surface formed by the face and its neighbors is not flat, it
+        // is unfolded onto the face plane; this maps a position on the surface
+        // to the unfolded spot relative to the center. Returns false when the
+        // projected spot is guaranteed outside lt's hull.
+        bool calc_adapted_spot_fast(const local_triangulation *lt, const vec3v &position,
+                                    const vec3v &phongnormal, vec3v &spot)
+        {
+            vec3v surfacespot;
+            math::subtract(position, lt->center, surfacespot);
+            vec_t dot = math::dot(surfacespot, lt->normal);
+            math::multiply_add(surfacespot, -dot, lt->normal, spot);
+
+            // |adapted_spot| >= |spot| by triangle inequality, so any spot
+            // beyond max_hull_dist is guaranteed to fail calc_weight.
+            if (math::dot(spot, spot) > lt->max_hull_dist_sq)
+            {
+                return false;
+            }
+
+            vec_t frac;
+            dot = math::dot(spot, phongnormal);
+            if (std::fabs(dot) > math::on_epsilon)
+            {
+                frac = math::dot(surfacespot, phongnormal) / dot;
+                // correct some extreme cases
+                frac = frac < 1 ? frac : 1;
+                frac = 0 > frac ? 0 : frac;
+            }
+            else
+            {
+                frac = 0;
+            }
+            vec3v middle;
+            math::scale(spot, frac, middle);
+
+            vec_t dist = (vec_t)math::length(spot);
+            vec3v v;
+            math::subtract(surfacespot, middle, v);
+            vec_t dist2 = (vec_t)(math::length(middle) + math::length(v));
 
             if (dist > math::on_epsilon && std::fabs(dist2 - dist) > math::on_epsilon)
             {
@@ -222,7 +272,6 @@ namespace rad
             int i;
             int j;
             vec_t angle;
-            std::vector<vec_t> angles;
             vec_t frac;
             vec_t len;
             vec_t dist;
@@ -233,28 +282,28 @@ namespace rad
                 return true;
             }
 
-            if ((int)lt->sortedhullpoints.size() == 0)
+            const int hull_count = (int)lt->sortedhullpoints.size();
+            if (hull_count == 0)
             {
                 *weight_out = 0.0;
                 return false;
             }
 
-            angles.resize((size_t)lt->sortedhullpoints.size());
-            for (i = 0; i < (int)lt->sortedhullpoints.size(); i++)
-            {
-                angle = get_angle(lt->sortedhullpoints[(size_t)i].direction, direction, lt->normal);
-                angles[(size_t)i] = get_angle_diff(angle, 0);
-            }
             j = 0;
-            for (i = 1; i < (int)lt->sortedhullpoints.size(); i++)
+            vec_t best_angle = get_angle_diff(
+                get_angle(lt->sortedhullpoints[0].direction, direction, lt->normal), 0);
+            for (i = 1; i < hull_count; i++)
             {
-                if (angles[(size_t)i] < angles[(size_t)j])
+                angle = get_angle_diff(
+                    get_angle(lt->sortedhullpoints[(size_t)i].direction, direction, lt->normal), 0);
+                if (angle < best_angle)
                 {
+                    best_angle = angle;
                     j = i;
                 }
             }
             hp1 = &lt->sortedhullpoints[(size_t)j];
-            hp2 = &lt->sortedhullpoints[(size_t)((j + 1) % (int)lt->sortedhullpoints.size())];
+            hp2 = &lt->sortedhullpoints[(size_t)((j + 1) % hull_count)];
 
             frac = get_frac(hp1->spot, hp2->spot, direction, lt->normal);
 
@@ -282,7 +331,7 @@ namespace rad
             return !istoofar;
         }
 
-        void calc_interpolation_square(const local_triangulation *lt, int i, const vec3v &spot, interpolation *interp)
+        void calc_interpolation_square(const local_triangulation *lt, int i, const vec3v &spot, local_interp *interp)
         {
             const local_triangulation::wedge *w1;
             const local_triangulation::wedge *w2;
@@ -475,7 +524,7 @@ namespace rad
 
             interp->isbiased = false;
             interp->totalweight = 1.0;
-            interp->points.resize(4);
+            interp->count = 4;
             interp->points[0].patchnum = lt->patchnum;
             interp->points[0].weight = weights[0];
             interp->points[1].patchnum = w1->leftpatchnum;
@@ -488,7 +537,7 @@ namespace rad
 
         // the interpolation function is defined over the entire plane, so this
         // never fails
-        void calc_interpolation(const local_triangulation *lt, const vec3v &spot, interpolation *interp)
+        void calc_interpolation(const local_triangulation *lt, const vec3v &spot, local_interp *interp)
         {
             vec3v direction;
             const local_triangulation::wedge *w;
@@ -497,24 +546,24 @@ namespace rad
             int i;
             int j;
             vec_t angle;
-            std::vector<vec_t> angles;
 
             if (get_direction(spot, lt->normal, direction) <= 2 * math::on_epsilon)
             {
                 // spot happens to be at the center
                 interp->isbiased = false;
                 interp->totalweight = 1.0;
-                interp->points.resize(1);
+                interp->count = 1;
                 interp->points[0].patchnum = lt->patchnum;
                 interp->points[0].weight = 1.0;
                 return;
             }
 
-            if ((int)lt->sortedwedges.size() == 0) // this local triangulation only has a center patch
+            const int wedge_count = (int)lt->sortedwedges.size();
+            if (wedge_count == 0) // this local triangulation only has a center patch
             {
                 interp->isbiased = true;
                 interp->totalweight = 1.0;
-                interp->points.resize(1);
+                interp->count = 1;
                 interp->points[0].patchnum = lt->patchnum;
                 interp->points[0].weight = 1.0;
                 return;
@@ -522,22 +571,21 @@ namespace rad
 
             // find the wedge with minimum non negative angle (counterclockwise)
             // past the spot
-            angles.resize((size_t)lt->sortedwedges.size());
-            for (i = 0; i < (int)lt->sortedwedges.size(); i++)
-            {
-                angle = get_angle(lt->sortedwedges[(size_t)i].leftdirection, direction, lt->normal);
-                angles[(size_t)i] = get_angle_diff(angle, 0);
-            }
             j = 0;
-            for (i = 1; i < (int)lt->sortedwedges.size(); i++)
+            vec_t best_angle = get_angle_diff(
+                get_angle(lt->sortedwedges[0].leftdirection, direction, lt->normal), 0);
+            for (i = 1; i < wedge_count; i++)
             {
-                if (angles[(size_t)i] < angles[(size_t)j])
+                angle = get_angle_diff(
+                    get_angle(lt->sortedwedges[(size_t)i].leftdirection, direction, lt->normal), 0);
+                if (angle < best_angle)
                 {
+                    best_angle = angle;
                     j = i;
                 }
             }
             w = &lt->sortedwedges[(size_t)j];
-            wnext = &lt->sortedwedges[(size_t)((j + 1) % (int)lt->sortedwedges.size())];
+            wnext = &lt->sortedwedges[(size_t)((j + 1) % wedge_count)];
 
             // different wedge types use different interpolation methods
             switch (w->shape)
@@ -579,7 +627,7 @@ namespace rad
                     {
                         interp->isbiased = true;
                         interp->totalweight = 1.0;
-                        interp->points.resize(2);
+                        interp->count = 2;
                         interp->points[0].patchnum = w->leftpatchnum;
                         interp->points[0].weight = 1 - frac;
                         interp->points[1].patchnum = wnext->leftpatchnum;
@@ -600,7 +648,7 @@ namespace rad
                     {
                         interp->isbiased = false;
                         interp->totalweight = 1.0;
-                        interp->points.resize(3);
+                        interp->count = 3;
                         interp->points[0].patchnum = lt->patchnum;
                         interp->points[0].weight = 1 - ratio;
                         interp->points[1].patchnum = w->leftpatchnum;
@@ -627,7 +675,7 @@ namespace rad
                     {
                         interp->isbiased = true;
                         interp->totalweight = 1.0;
-                        interp->points.resize(1);
+                        interp->count = 1;
                         interp->points[0].patchnum = w->leftpatchnum;
                         interp->points[0].weight = 1.0;
                     }
@@ -635,7 +683,7 @@ namespace rad
                     {
                         interp->isbiased = true;
                         interp->totalweight = 1.0;
-                        interp->points.resize(1);
+                        interp->count = 1;
                         interp->points[0].patchnum = wnext->leftpatchnum;
                         interp->points[0].weight = 1.0;
                     }
@@ -647,7 +695,7 @@ namespace rad
 
                         interp->isbiased = true;
                         interp->totalweight = 1.0;
-                        interp->points.resize(2);
+                        interp->count = 2;
                         interp->points[0].patchnum = w->leftpatchnum;
                         interp->points[0].weight = 1 - frac;
                         interp->points[1].patchnum = lt->patchnum;
@@ -661,7 +709,7 @@ namespace rad
 
                         interp->isbiased = true;
                         interp->totalweight = 1.0;
-                        interp->points.resize(2);
+                        interp->count = 2;
                         interp->points[0].patchnum = lt->patchnum;
                         interp->points[0].weight = 1 - frac;
                         interp->points[1].patchnum = wnext->leftpatchnum;
@@ -683,7 +731,7 @@ namespace rad
                         {
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(1);
+                            interp->count = 1;
                             interp->points[0].patchnum = lt->patchnum;
                             interp->points[0].weight = 1.0;
                         }
@@ -691,7 +739,7 @@ namespace rad
                         {
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(1);
+                            interp->count = 1;
                             interp->points[0].patchnum = w->leftpatchnum;
                             interp->points[0].weight = 1.0;
                         }
@@ -703,7 +751,7 @@ namespace rad
 
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(2);
+                            interp->count = 2;
                             interp->points[0].patchnum = lt->patchnum;
                             interp->points[0].weight = 1 - ratio;
                             interp->points[1].patchnum = w->leftpatchnum;
@@ -718,7 +766,7 @@ namespace rad
                         {
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(1);
+                            interp->count = 1;
                             interp->points[0].patchnum = lt->patchnum;
                             interp->points[0].weight = 1.0;
                         }
@@ -726,7 +774,7 @@ namespace rad
                         {
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(1);
+                            interp->count = 1;
                             interp->points[0].patchnum = wnext->leftpatchnum;
                             interp->points[0].weight = 1.0;
                         }
@@ -738,7 +786,7 @@ namespace rad
 
                             interp->isbiased = true;
                             interp->totalweight = 1.0;
-                            interp->points.resize(2);
+                            interp->count = 2;
                             interp->points[0].patchnum = lt->patchnum;
                             interp->points[0].weight = 1 - ratio;
                             interp->points[1].patchnum = wnext->leftpatchnum;
@@ -1336,6 +1384,16 @@ namespace rad
             // calculate hull points
             place_hull_points(lt);
 
+            double max_r = 2.0 * math::on_epsilon;
+            for (const auto &hp : lt->sortedhullpoints)
+            {
+                double r = math::length(hp.spot);
+                if (r > max_r)
+                    max_r = r;
+            }
+            max_r += 1.0;
+            lt->max_hull_dist_sq = (vec_t)(max_r * max_r);
+
             return lt;
         }
 
@@ -1535,22 +1593,33 @@ namespace rad
         }
     }
 
+    namespace
+    {
+        struct lerp_scratch
+        {
+            interpolation maininterp;
+            std::vector<vec_t> localweights;
+            std::vector<local_interp> localinterps;
+        };
+
+        thread_local lerp_scratch tls_lerp_scratch;
+    }
+
     void interpolate_sample_light(rad_state &state, const vec3v &position, int surface,
                                   int numstyles, const int *styles, vec3v *outs)
     {
         const face_triangulation *ft;
-        interpolation *maininterp;
-        std::vector<vec_t> localweights;
-        std::vector<interpolation *> localinterps;
+        lerp_scratch &scratch = tls_lerp_scratch;
+        interpolation *maininterp = &scratch.maininterp;
+        std::vector<vec_t> &localweights = scratch.localweights;
+        std::vector<local_interp> &localinterps = scratch.localinterps;
 
         int i;
         int j;
-        int n;
         const face_triangulation *ft2;
         const local_triangulation *lt;
         vec3v spot;
-        vec_t weight;
-        interpolation *interp;
+        vec_t weight = 0;
         const local_triangulation *best;
         vec3v v;
         vec_t dist;
@@ -1562,34 +1631,55 @@ namespace rad
             err::fatal("interpolate_sample_light: internal error: surface number out of range.");
         }
         ft = state.facetriangulations[(size_t)surface];
-        maininterp = new interpolation;
-        maininterp->points.reserve(64);
+        if (maininterp->points.capacity() < 64)
+            maininterp->points.reserve(64);
 
         // calculate local interpolations and their weights
-        localweights.resize(0);
-        localinterps.resize(0);
+        localweights.clear();
+        localinterps.clear();
         if (state.options.lerp_enabled)
         {
+            vec3v phongnormal;
+            bool phong_ready = false;
             for (i = 0; i < (int)ft->neighbors.size(); i++) // for this face and each of its neighbors
             {
                 ft2 = state.facetriangulations[(size_t)ft->neighbors[(size_t)i]];
+                if (ft2->localtriangulations.empty())
+                    continue;
+                // Every local triangulation on ft2 shares ft2->neighbors.
+                bool has_surface = false;
+                for (int nf : ft2->neighbors)
+                {
+                    if (nf == surface)
+                    {
+                        has_surface = true;
+                        break;
+                    }
+                }
+                if (!has_surface)
+                    continue;
+                if (!phong_ready)
+                {
+                    get_phong_normal(state, surface, position, phongnormal);
+                    phong_ready = true;
+                }
                 for (j = 0; j < (int)ft2->localtriangulations.size(); j++) // for each patch on that face
                 {
                     lt = ft2->localtriangulations[(size_t)j];
-                    if (!calc_adapted_spot(state, lt, position, surface, spot))
+                    if (!calc_adapted_spot_fast(lt, position, phongnormal, spot))
                     {
+                        weight = 0.0;
                         continue;
                     }
                     if (!calc_weight(lt, spot, &weight))
                     {
                         continue;
                     }
-                    interp = new interpolation;
-                    interp->points.reserve(4);
-                    calc_interpolation(lt, spot, interp);
+                    local_interp li;
+                    calc_interpolation(lt, spot, &li);
 
                     localweights.push_back(weight);
-                    localinterps.push_back(interp);
+                    localinterps.push_back(li);
                 }
             }
         }
@@ -1597,24 +1687,23 @@ namespace rad
         // combine into one interpolation
         maininterp->isbiased = false;
         maininterp->totalweight = 0;
-        maininterp->points.resize(0);
+        maininterp->points.clear();
         for (i = 0; i < (int)localinterps.size(); i++)
         {
-            if (localinterps[(size_t)i]->isbiased)
+            const local_interp &li = localinterps[(size_t)i];
+            if (li.isbiased)
             {
                 maininterp->isbiased = true;
             }
-            for (j = 0; j < (int)localinterps[(size_t)i]->points.size(); j++)
+            const vec_t lw = localweights[(size_t)i];
+            for (j = 0; j < li.count; j++)
             {
-                weight = localinterps[(size_t)i]->points[(size_t)j].weight * localweights[(size_t)i];
-                if (state.patches[(size_t)localinterps[(size_t)i]->points[(size_t)j].patchnum].flags == patch_flag_outside)
+                weight = li.points[j].weight * lw;
+                if (state.patches[(size_t)li.points[j].patchnum].flags == patch_flag_outside)
                 {
                     weight = (vec_t)(weight * 0.01);
                 }
-                n = (int)maininterp->points.size();
-                maininterp->points.resize((size_t)n + 1);
-                maininterp->points[(size_t)n].patchnum = localinterps[(size_t)i]->points[(size_t)j].patchnum;
-                maininterp->points[(size_t)n].weight = weight;
+                maininterp->points.push_back({li.points[j].patchnum, weight});
                 maininterp->totalweight += weight;
             }
         }
@@ -1637,24 +1726,22 @@ namespace rad
             // try again, don't multiply localweights[i] (which equals 0)
             maininterp->isbiased = false;
             maininterp->totalweight = 0;
-            maininterp->points.resize(0);
+            maininterp->points.clear();
             for (i = 0; i < (int)localinterps.size(); i++)
             {
-                if (localinterps[(size_t)i]->isbiased)
+                const local_interp &li = localinterps[(size_t)i];
+                if (li.isbiased)
                 {
                     maininterp->isbiased = true;
                 }
-                for (j = 0; j < (int)localinterps[(size_t)i]->points.size(); j++)
+                for (j = 0; j < li.count; j++)
                 {
-                    weight = localinterps[(size_t)i]->points[(size_t)j].weight;
-                    if (state.patches[(size_t)localinterps[(size_t)i]->points[(size_t)j].patchnum].flags == patch_flag_outside)
+                    weight = li.points[j].weight;
+                    if (state.patches[(size_t)li.points[j].patchnum].flags == patch_flag_outside)
                     {
                         weight = (vec_t)(weight * 0.01);
                     }
-                    n = (int)maininterp->points.size();
-                    maininterp->points.resize((size_t)n + 1);
-                    maininterp->points[(size_t)n].patchnum = localinterps[(size_t)i]->points[(size_t)j].patchnum;
-                    maininterp->points[(size_t)n].weight = weight;
+                    maininterp->points.push_back({li.points[j].patchnum, weight});
                     maininterp->totalweight += weight;
                 }
             }
@@ -1697,7 +1784,10 @@ namespace rad
                     math::subtract(position, lt->center, spot);
                     dot = math::dot(spot, lt->normal);
                     math::multiply_add(spot, -dot, lt->normal, spot);
-                    calc_interpolation(lt, spot, maininterp);
+                    local_interp li;
+                    calc_interpolation(lt, spot, &li);
+                    maininterp->isbiased = li.isbiased;
+                    maininterp->points.assign(li.points, li.points + li.count);
 
                     maininterp->totalweight = 0;
                     for (j = 0; j < (int)maininterp->points.size(); j++)
@@ -1724,7 +1814,7 @@ namespace rad
                 {
                     maininterp->isbiased = true;
                     maininterp->totalweight = 0;
-                    maininterp->points.resize(0);
+                    maininterp->points.clear();
                     apply_interpolation(state, maininterp, numstyles, styles, outs);
                     if (state.options.drawlerp)
                     {
@@ -1738,12 +1828,6 @@ namespace rad
                     }
                 }
             }
-        }
-        delete maininterp;
-
-        for (i = 0; i < (int)localinterps.size(); i++)
-        {
-            delete localinterps[(size_t)i];
         }
     }
 

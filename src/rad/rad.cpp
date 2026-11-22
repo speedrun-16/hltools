@@ -115,8 +115,78 @@ namespace rad
             }
         }
 
+        // compact per-patch bounce source for the common single-style-0 fast path
+        // (40 bytes/patch instead of ~320 bytes in patch + separate emitlight array)
+        struct bounce_src0
+        {
+            vec3v direct;
+            vec3v emit;
+            vec3v refl;
+            uint8_t has_direct;
+            uint8_t has_emit;
+        };
+
+        template <float_format CompressType>
+        void gather_light_item_style0(const rad_state &state, bounce_arrays &ba,
+                                      const bounce_src0 *sources, int j)
+        {
+            const patch *pt = &state.patches[(size_t)j];
+            vec3v add0 = {0, 0, 0};
+            if (pt->totalstyle[0] == 0)
+            {
+                math::add(add0, pt->totallight[0], add0);
+            }
+
+            const transfer_data *t_data = pt->t_data;
+            const transfer_index *t_index = pt->t_index;
+            const unsigned i_index = pt->i_index;
+            constexpr size_t step = (CompressType == float_format::float32) ? 4
+                : ((CompressType == float_format::float16) ? 2 : 1);
+
+            for (unsigned k = 0; k < i_index; k++, t_index++)
+            {
+                const unsigned size = t_index->size + 1;
+                unsigned patchnum = t_index->index;
+
+                for (unsigned l = 0; l < size; l++, t_data += step, patchnum++)
+                {
+                    float f;
+                    float_decompress(CompressType, t_data, &f);
+                    const bounce_src0 &src = sources[patchnum];
+                    if (src.has_direct)
+                    {
+                        vec3v v;
+                        math::scale(src.direct, f, v);
+                        math::multiply(v, src.refl, v);
+                        if (is_point_finite(v))
+                        {
+                            math::add(add0, v, add0);
+                        }
+                    }
+                    if (src.has_emit)
+                    {
+                        vec3v v;
+                        math::scale(src.emit, f, v);
+                        math::multiply(v, src.refl, v);
+                        if (is_point_finite(v))
+                        {
+                            math::add(add0, v, add0);
+                        }
+                    }
+                }
+            }
+
+            ba.newstyles[j][0] = 0;
+            math::copy(add0, ba.addlight[j][0]);
+            for (unsigned m = 1; m < maxlightmaps; m++)
+            {
+                ba.newstyles[j][m] = 255;
+            }
+        }
+
         // gathers light from the transfer list of one patch runs multithreaded
-        void gather_light_item(rad_state &state, bounce_arrays &ba, unsigned int &fastfind_index, int j)
+        void gather_light_item(rad_state &state, bounce_arrays &ba, unsigned int &fastfind_index,
+                               bool has_opaque_styles, int j)
         {
             patch *pt;
             unsigned k, m;
@@ -125,9 +195,17 @@ namespace rad
             transfer_index *t_index;
             float f;
             vec3v adds[allstyles];
+            unsigned long long adds_touched = 0;
             int style;
 
-            memset(adds, 0, allstyles * sizeof(vec3v));
+            auto adds_touch = [&](int s)
+            {
+                if (!(adds_touched & (1ull << s)))
+                {
+                    adds_touched |= 1ull << s;
+                    math::clear(adds[s]);
+                }
+            };
 
             pt = &state.patches[(size_t)j];
 
@@ -137,8 +215,12 @@ namespace rad
 
             for (m = 0; m < maxlightmaps && pt->totalstyle[m] != 255; m++)
             {
+                adds_touch(pt->totalstyle[m]);
                 math::add(adds[pt->totalstyle[m]], pt->totallight[m], adds[pt->totalstyle[m]]);
             }
+
+            const float_format compress_type = state.options.transfer_compress_type;
+            const size_t elem_size = float_format_size[(int)compress_type];
 
             for (k = 0; k < i_index; k++, t_index++)
             {
@@ -146,14 +228,15 @@ namespace rad
                 unsigned size = (t_index->size + 1);
                 unsigned patchnum = t_index->index;
 
-                for (l = 0; l < size; l++, t_data += float_format_size[(int)state.options.transfer_compress_type], patchnum++)
+                for (l = 0; l < size; l++, t_data += elem_size, patchnum++)
                 {
                     vec3v v;
                     patch *emitpatch = &state.patches[patchnum];
                     unsigned emitstyle;
                     int opaquestyle = -1;
-                    get_style(state, (unsigned)j, patchnum, opaquestyle, fastfind_index);
-                    float_decompress(state.options.transfer_compress_type, t_data, &f);
+                    if (has_opaque_styles)
+                        get_style(state, (unsigned)j, patchnum, opaquestyle, fastfind_index);
+                    float_decompress(compress_type, t_data, &f);
 
                     // for each style on the emitting patch
                     for (emitstyle = 0; emitstyle < maxlightmaps && emitpatch->directstyle[emitstyle] != 255; emitstyle++)
@@ -177,6 +260,7 @@ namespace rad
                                 else
                                     continue;
                             }
+                            adds_touch(addstyle);
                             math::add(adds[addstyle], v, adds[addstyle]);
                         }
                     }
@@ -201,16 +285,18 @@ namespace rad
                                 else
                                     continue;
                             }
+                            adds_touch(addstyle);
                             math::add(adds[addstyle], v, adds[addstyle]);
                         }
                     }
                 }
             }
 
+            adds_touch(0);
             vec_t maxlights[allstyles];
             for (style = 0; style < allstyles; style++)
             {
-                maxlights[style] = vector_maximum(adds[style]);
+                maxlights[style] = (adds_touched & (1ull << style)) ? vector_maximum(adds[style]) : 0;
             }
             for (m = 0; m < maxlightmaps; m++)
             {
@@ -219,7 +305,7 @@ namespace rad
                 {
                     beststyle = 0;
                 }
-                else
+                else if (adds_touched & ~1ull)
                 {
                     vec_t bestmaxlight = 0;
                     for (style = 1; style < allstyles; style++)
@@ -242,15 +328,18 @@ namespace rad
                     ba.newstyles[j][m] = 255;
                 }
             }
-            for (style = 1; style < allstyles; style++)
+            if (adds_touched & ~1ull)
             {
-                if (maxlights[style] > state.maxdiscardedlight + math::normal_epsilon)
+                for (style = 1; style < allstyles; style++)
                 {
-                    std::lock_guard<std::mutex> guard(state.lock);
                     if (maxlights[style] > state.maxdiscardedlight + math::normal_epsilon)
                     {
-                        state.maxdiscardedlight = maxlights[style];
-                        math::copy(pt->origin, state.maxdiscardedpos);
+                        std::lock_guard<std::mutex> guard(state.lock);
+                        if (maxlights[style] > state.maxdiscardedlight + math::normal_epsilon)
+                        {
+                            state.maxdiscardedlight = maxlights[style];
+                            math::copy(pt->origin, state.maxdiscardedpos);
+                        }
                     }
                 }
             }
@@ -443,6 +532,25 @@ namespace rad
                 }
             }
 
+            const bool has_opaque_styles = !state.style_list.empty();
+            std::vector<bounce_src0> src0;
+            auto can_use_style0 = [&]() -> bool
+            {
+                if (has_opaque_styles)
+                    return false;
+                for (unsigned p = 0; p < state.num_patches; p++)
+                {
+                    const patch &pt = state.patches[p];
+                    if (pt.bouncestyle != -1)
+                        return false;
+                    if (pt.directstyle[0] != 255 && (pt.directstyle[0] != 0 || pt.directstyle[1] != 255))
+                        return false;
+                    if (pt.totalstyle[0] != 255 && (pt.totalstyle[0] != 0 || pt.totalstyle[1] != 255))
+                        return false;
+                }
+                return true;
+            };
+
             auto bounce_start = std::chrono::steady_clock::now();
             for (i = 0; i < state.options.numbounce; i++)
             {
@@ -453,11 +561,56 @@ namespace rad
                         gather_rgb_light_item(state, ba, fastfind_index, idx);
                     });
                 }
+                else if (can_use_style0())
+                {
+                    src0.resize(state.num_patches);
+                    for (unsigned p = 0; p < state.num_patches; p++)
+                    {
+                        const patch &pt = state.patches[p];
+                        bounce_src0 &s = src0[p];
+                        s.has_direct = (pt.directstyle[0] == 0) ? 1 : 0;
+                        s.has_emit = (pt.totalstyle[0] == 0) ? 1 : 0;
+                        if (s.has_direct)
+                            math::copy(pt.directlight[0], s.direct);
+                        else
+                            math::clear(s.direct);
+                        if (s.has_emit)
+                            math::copy(ba.emitlight[p][0], s.emit);
+                        else
+                            math::clear(s.emit);
+                        math::copy(pt.bouncereflectivity, s.refl);
+                    }
+                    const bounce_src0 *src0_ptr = src0.data();
+                    switch (state.options.transfer_compress_type)
+                    {
+                    case float_format::float16:
+                        threads::run((int)state.num_patches, [&](int idx) {
+                            gather_light_item_style0<float_format::float16>(state, ba, src0_ptr, idx);
+                        });
+                        break;
+                    case float_format::float32:
+                        threads::run((int)state.num_patches, [&](int idx) {
+                            gather_light_item_style0<float_format::float32>(state, ba, src0_ptr, idx);
+                        });
+                        break;
+                    case float_format::float8:
+                        threads::run((int)state.num_patches, [&](int idx) {
+                            gather_light_item_style0<float_format::float8>(state, ba, src0_ptr, idx);
+                        });
+                        break;
+                    default:
+                        threads::run((int)state.num_patches, [&](int idx) {
+                            thread_local unsigned int fastfind_index = 0;
+                            gather_light_item(state, ba, fastfind_index, has_opaque_styles, idx);
+                        });
+                        break;
+                    }
+                }
                 else
                 {
                     threads::run((int)state.num_patches, [&](int idx) {
                         thread_local unsigned int fastfind_index = 0;
-                        gather_light_item(state, ba, fastfind_index, idx);
+                        gather_light_item(state, ba, fastfind_index, has_opaque_styles, idx);
                     });
                 }
                 collect_light(state, ba);
