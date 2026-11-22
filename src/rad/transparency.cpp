@@ -144,6 +144,15 @@ namespace rad
                           vec3v &trans, unsigned int &next_index)
     {
         trans = vec3_one;
+        if (state.trans_sorted.empty())
+            return;
+        if (next_index >= state.trans_sorted.size()
+            || (next_index > 0
+                && (state.trans_sorted[next_index - 1].p1 > p1
+                    || (state.trans_sorted[next_index - 1].p1 == p1 && state.trans_sorted[next_index - 1].p2 >= p2))))
+        {
+            next_index = 0;
+        }
 
         for (unsigned i = next_index; i < state.trans_sorted.size(); i++)
         {
@@ -225,6 +234,15 @@ namespace rad
                    int &style, unsigned int &next_index)
     {
         style = -1;
+        if (state.style_list.empty())
+            return;
+        if (next_index >= state.style_list.size()
+            || (next_index > 0
+                && (state.style_list[next_index - 1].p1 > p1
+                    || (state.style_list[next_index - 1].p1 == p1 && state.style_list[next_index - 1].p2 >= p2))))
+        {
+            next_index = 0;
+        }
 
         for (unsigned i = next_index; i < state.style_list.size(); i++)
         {
