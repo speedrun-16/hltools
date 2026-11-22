@@ -11,7 +11,7 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 128) in;
 
 const float ON_EPSILON = 0.04;
 const float NORMAL_EPSILON = 0.00001;
@@ -44,7 +44,7 @@ struct Pair
 
 layout(std430, set = 0, binding = 0) readonly buffer PatchBuffer { PatchData patches[]; };
 layout(std430, set = 0, binding = 1) readonly buffer WindingBuffer { float windings[]; };
-layout(std430, set = 0, binding = 2) readonly buffer SkyNormalBuffer { float skyNormals[]; }; // 4 floats per normal
+layout(std430, set = 0, binding = 2) readonly buffer SkyNormalBuffer { vec4 skyNormals[]; }; // xyz + weight per normal
 layout(std430, set = 0, binding = 3) readonly buffer SkyLevelBuffer { int skyLevels[]; }; // ofs,count per level
 layout(std430, set = 0, binding = 4) readonly buffer PairBuffer { Pair pairs[]; };
 layout(std430, set = 0, binding = 5) writeonly buffer OutBuffer { float outTrans[]; };
@@ -83,7 +83,7 @@ float calcSightArea(float rx, float ry, float rz, float rnx, float rny, float rn
     bool error = false;
     for (int x = 0; x < windCount; x++)
     {
-        int x2 = (x + 1) % windCount;
+        int x2 = (x + 1 == windCount) ? 0 : x + 1;
         float v1x = windings[(windOfs + x) * 3 + 0] - rx;
         float v1y = windings[(windOfs + x) * 3 + 1] - ry;
         float v1z = windings[(windOfs + x) * 3 + 2] - rz;
@@ -105,10 +105,11 @@ float calcSightArea(float rx, float ry, float rz, float rnx, float rny, float rn
         int count = skyLevels[skylevel * 2 + 1];
         for (int i = 0; i < count; i++)
         {
-            float snx = skyNormals[(ofs + i) * 4 + 0];
-            float sny = skyNormals[(ofs + i) * 4 + 1];
-            float snz = skyNormals[(ofs + i) * 4 + 2];
-            float weight = skyNormals[(ofs + i) * 4 + 3];
+            vec4 sn = skyNormals[ofs + i];
+            float snx = sn.x;
+            float sny = sn.y;
+            float snz = sn.z;
+            float weight = sn.w;
             float dot1 = snx * rnx + sny * rny + snz * rnz;
             if (dot1 <= 0.0)
                 continue;

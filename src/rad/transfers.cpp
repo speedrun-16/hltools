@@ -1,10 +1,16 @@
-#include <bitset>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 
 #include "../common/error.h"
 #include "../common/log.h"
@@ -66,6 +72,183 @@ namespace rad
 
     namespace
     {
+        inline unsigned ctz_u32(unsigned v)
+        {
+#ifdef _MSC_VER
+            unsigned long idx = 0;
+            _BitScanForward(&idx, v);
+            return (unsigned)idx;
+#else
+            return (unsigned)__builtin_ctz(v);
+#endif
+        }
+
+        // precomputed popcount for 8-bit sparse vismatrix masks
+        constexpr uint8_t popcount8_lut[256] = {
+            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+            1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+            1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+            1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+            2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+            3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+            3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+            4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8,
+        };
+
+        // transposed view of the upper-triangular sparse visibility matrix
+        // for each patch i:
+        //   below_list[below_first[i] .. below_first[i + 1]) holds visible j < i ascending
+        //   state.sparse_columns[i] holds visible j > i ascending
+        struct sparse_transpose
+        {
+            std::vector<size_t> below_first;
+            std::vector<unsigned> below_list;
+            std::vector<unsigned> above_count;
+        };
+
+        sparse_transpose build_sparse_transpose(const rad_state &state)
+        {
+            sparse_transpose st;
+            const unsigned n = state.num_patches;
+            st.below_first.assign((size_t)n + 1, 0);
+            st.above_count.assign((size_t)n, 0);
+            if (n == 0)
+                return st;
+
+            const int num_chunks = std::max(1, std::min(threads::count(), 16));
+            const unsigned chunk_size = (n + (unsigned)num_chunks - 1) / (unsigned)num_chunks;
+            std::vector<std::vector<uint32_t>> chunk_counts((size_t)num_chunks);
+            for (int t = 0; t < num_chunks; t++)
+                chunk_counts[(size_t)t].assign((size_t)n, 0);
+
+            threads::run(num_chunks, [&](int t) {
+                const unsigned x_begin = (unsigned)t * chunk_size;
+                const unsigned x_end = std::min(n, x_begin + chunk_size);
+                uint32_t *counts = chunk_counts[(size_t)t].data();
+                for (unsigned x = x_begin; x < x_end; x++)
+                {
+                    const sparse_column &column = state.sparse_columns[x];
+                    unsigned ac = 0;
+                    for (int r = 0; r < column.count; r++)
+                    {
+                        unsigned bits = column.row[r].values & 0xffu;
+                        ac += popcount8_lut[bits];
+                        const unsigned ybase = column.row[r].offset * 8;
+                        while (bits)
+                        {
+                            const unsigned b = ctz_u32(bits);
+                            bits &= bits - 1;
+                            counts[ybase + b]++;
+                        }
+                    }
+                    st.above_count[x] = ac;
+                }
+            });
+
+            // prefix sum across chunks -> below_first[y] and per-chunk write cursors
+            std::vector<std::vector<size_t>> chunk_cursor((size_t)num_chunks);
+            for (int t = 0; t < num_chunks; t++)
+                chunk_cursor[(size_t)t].resize((size_t)n);
+
+            size_t total = 0;
+            for (unsigned y = 0; y < n; y++)
+            {
+                st.below_first[y] = total;
+                for (int t = 0; t < num_chunks; t++)
+                {
+                    chunk_cursor[(size_t)t][y] = total;
+                    total += chunk_counts[(size_t)t][y];
+                }
+            }
+            st.below_first[n] = total;
+            st.below_list.resize(total);
+
+            // fill in parallel by x-chunk: within each y, chunk 0 precedes chunk 1 < ...
+            // and x ascends within each chunk, preserving strict ascending order
+            threads::run(num_chunks, [&](int t) {
+                const unsigned x_begin = (unsigned)t * chunk_size;
+                const unsigned x_end = std::min(n, x_begin + chunk_size);
+                size_t *cursor = chunk_cursor[(size_t)t].data();
+                unsigned *dst = st.below_list.data();
+                for (unsigned x = x_begin; x < x_end; x++)
+                {
+                    const sparse_column &column = state.sparse_columns[x];
+                    for (int r = 0; r < column.count; r++)
+                    {
+                        unsigned bits = column.row[r].values & 0xffu;
+                        const unsigned ybase = column.row[r].offset * 8;
+                        while (bits)
+                        {
+                            const unsigned b = ctz_u32(bits);
+                            bits &= bits - 1;
+                            dst[cursor[ybase + b]++] = x;
+                        }
+                    }
+                }
+            });
+
+            return st;
+        }
+
+        template <typename Fn>
+        void for_each_sparse_visible(const rad_state &state, const sparse_transpose &transpose,
+                                     unsigned i, unsigned int &fastfind_index, Fn &&fn)
+        {
+            const bool custom_shadow = state.options.customshadow_with_bouncelight;
+            const size_t b_begin = transpose.below_first[i];
+            const size_t b_end = transpose.below_first[i + 1];
+            for (size_t b = b_begin; b < b_end; b++)
+            {
+                const unsigned j = transpose.below_list[b];
+                if (i == j)
+                    continue;
+                vec3v transparency = {1.0, 1.0, 1.0};
+                if (custom_shadow)
+                    get_transparency(state, i, j, transparency, fastfind_index);
+                fn(j, transparency, false);
+            }
+            const sparse_column &column = state.sparse_columns[i];
+            for (int r = 0; r < column.count; r++)
+            {
+                unsigned bits = column.row[r].values & 0xffu;
+                const unsigned ybase = column.row[r].offset * 8;
+                while (bits)
+                {
+                    const unsigned bit = ctz_u32(bits);
+                    bits &= bits - 1;
+                    const unsigned j = ybase + bit;
+                    if (i == j)
+                        continue;
+                    vec3v transparency = {1.0, 1.0, 1.0};
+                    if (custom_shadow)
+                        get_transparency(state, i, j, transparency, fastfind_index);
+                    fn(j, transparency, false);
+                }
+            }
+        }
+
+        struct transfer_stats
+        {
+            std::atomic<size_t> index_bytes{0};
+            std::atomic<size_t> data_bytes{0};
+            std::atomic<size_t> total_transfer{0};
+
+            void flush_to(rad_state &state) const
+            {
+                state.transfer_index_bytes += index_bytes.load(std::memory_order_relaxed);
+                state.transfer_data_bytes += data_bytes.load(std::memory_order_relaxed);
+                state.total_transfer += total_transfer.load(std::memory_order_relaxed);
+            }
+        };
+
         unsigned get_length_of_run(const transfer_raw_index *raw, const transfer_raw_index *const end)
         {
             unsigned run_size = 0;
@@ -90,7 +273,7 @@ namespace rad
             return run_size;
         }
 
-        transfer_index *compress_transfer_indicies(rad_state &state, transfer_raw_index *t_raw,
+        transfer_index *compress_transfer_indicies(transfer_stats &stats, transfer_raw_index *t_raw,
                                                    const unsigned raw_size, unsigned *i_size)
         {
             unsigned x;
@@ -135,10 +318,7 @@ namespace rad
                 err::fatal("compress_transfer_indicies: internal error");
             }
 
-            {
-                std::lock_guard<std::mutex> guard(state.lock);
-                state.transfer_index_bytes += sizeof(transfer_index) * compressed_count;
-            }
+            stats.index_bytes.fetch_add(sizeof(transfer_index) * compressed_count, std::memory_order_relaxed);
 
             return compressed_array;
         }
@@ -157,15 +337,13 @@ namespace rad
 
         // builds the transfer list of patch i: which patch2's it collects
         // light from
-        void make_scales_item(rad_state &state, const int i)
+        void make_scales_item(rad_state &state, const sparse_transpose *transpose, transfer_stats &stats, const int i)
         {
-            unsigned j;
             vec3v delta;
             vec_t dist;
             int count;
             float trans;
             patch *pt;
-            patch *patch2;
             vec3v origin;
 
             scales_scratch &scratch = tls_scratch;
@@ -200,51 +378,19 @@ namespace rad
             lighting_scale = state.lightingconeinfo[(size_t)miptex][1];
             lighting_diversify = (lighting_power != 1.0 || lighting_scale != 1.0);
 
-            // find out which patch2's the patch collects light from
-            for (j = 0, patch2 = state.patches.data(); j < state.num_patches; j++, patch2++)
+            auto eval_pair = [&](unsigned j, const vec3v &transparency, bool useback)
             {
-                vec_t dot1;
-                vec_t dot2;
-
-                vec3v transparency = {1.0, 1.0, 1.0};
-                bool useback;
-                useback = false;
-
-                if (!state.check_vis_bit(state, (unsigned)i, j, transparency, scratch.fastfind_index) || ((unsigned)i == j))
-                {
-                    if (pt->translucent_b)
-                    {
-                        if (((unsigned)i == j) ||
-                            !check_vis_bit_backwards(state, (unsigned)i, j, backorigin, backnormal, transparency))
-                        {
-                            continue;
-                        }
-                        useback = true;
-                    }
-                    else
-                    {
-                        continue;
-                    }
-                }
-
+                const patch *patch2 = &state.patches[(size_t)j];
                 const vec3v &normal2 = plane_from_face_number(state, (unsigned)patch2->facenumber)->normal;
 
                 // calculate transference
-                math::subtract(patch2->origin, origin, delta);
-                if (useback)
-                {
-                    math::subtract(patch2->origin, backorigin, delta);
-                }
+                math::subtract(patch2->origin, useback ? backorigin : origin, delta);
                 // move emitter back to its plane
                 math::multiply_add(delta, -patch_hunt_offset, normal2, delta);
 
                 dist = math::normalize(delta);
-                dot1 = math::dot(delta, normal1);
-                if (useback)
-                {
-                    dot1 = math::dot(delta, backnormal);
-                }
-                dot2 = -math::dot(delta, normal2);
+                vec_t dot1 = math::dot(delta, useback ? backnormal : normal1);
+                vec_t dot2 = -math::dot(delta, normal2);
                 bool light_behind_surface = false;
                 if (dot1 <= math::normal_epsilon)
                 {
@@ -252,7 +398,7 @@ namespace rad
                 }
                 if (dot2 * dist <= minimum_patch_distance)
                 {
-                    continue;
+                    return;
                 }
 
                 if (lighting_diversify && !light_behind_surface)
@@ -269,21 +415,12 @@ namespace rad
                     {
                         trans = 0.0;
                     }
-                    vec_t sightarea;
-                    const vec3v *receiver_origin = &origin;
-                    const vec3v *receiver_normal = &normal1;
-                    const math::winding *emitter_winding;
-                    if (useback)
-                    {
-                        receiver_origin = &backorigin;
-                        receiver_normal = &backnormal;
-                    }
-                    emitter_winding = patch2->winding;
-                    sightarea = calc_sight_area(state, *receiver_origin, *receiver_normal, emitter_winding,
-                                                patch2->emitter_skylevel, lighting_power, lighting_scale);
+                    const vec3v *receiver_origin = useback ? &backorigin : &origin;
+                    const vec3v *receiver_normal = useback ? &backnormal : &normal1;
+                    vec_t sightarea = calc_sight_area(state, *receiver_origin, *receiver_normal, patch2->winding,
+                                                      patch2->emitter_skylevel, lighting_power, lighting_scale);
 
-                    vec_t frac;
-                    frac = dist / patch2->emitter_range;
+                    vec_t frac = dist / patch2->emitter_range;
                     frac = (frac - 0.5f) * 2.0f; // smooth transition between the two methods
                     frac = frac < 1 ? frac : 1;
                     frac = 0 > frac ? 0 : frac;
@@ -293,7 +430,7 @@ namespace rad
                 {
                     if (light_behind_surface)
                     {
-                        continue;
+                        return;
                     }
                 }
 
@@ -311,12 +448,10 @@ namespace rad
                     }
                 }
 
-                {
-                    trans = trans * patch2->area;
-                }
+                trans = trans * patch2->area;
                 if (trans <= 0.0)
                 {
-                    continue;
+                    return;
                 }
 
                 *t_data = trans;
@@ -325,57 +460,79 @@ namespace rad
                 t_index++;
                 pt->i_data++;
                 count++;
+            };
+
+            // find out which patch2's the patch collects light from
+            if (transpose && !pt->translucent_b)
+            {
+                for_each_sparse_visible(state, *transpose, (unsigned)i, scratch.fastfind_index, eval_pair);
+            }
+            else
+            {
+                for (unsigned j = 0; j < state.num_patches; j++)
+                {
+                    vec3v transparency = {1.0, 1.0, 1.0};
+                    bool useback = false;
+
+                    if (!state.check_vis_bit(state, (unsigned)i, j, transparency, scratch.fastfind_index) || ((unsigned)i == j))
+                    {
+                        if (pt->translucent_b)
+                        {
+                            if (((unsigned)i == j) ||
+                                !check_vis_bit_backwards(state, (unsigned)i, j, backorigin, backnormal, transparency))
+                            {
+                                continue;
+                            }
+                            useback = true;
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+                    eval_pair(j, transparency, useback);
+                }
             }
 
             // copy the transfers out
             if (pt->i_data)
             {
-                unsigned data_size = pt->i_data * (unsigned)float_format_size[(int)state.options.transfer_compress_type] + (unsigned)transfer_unused_size;
+                const auto compress_type = state.options.transfer_compress_type;
+                const unsigned elem_size = (unsigned)float_format_size[(int)compress_type];
+                unsigned data_size = pt->i_data * elem_size + (unsigned)transfer_unused_size;
 
-                pt->t_data = (transfer_data *)std::calloc(data_size, 1);
-                pt->t_index = compress_transfer_indicies(state, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
+                pt->t_data = (transfer_data *)std::malloc(data_size);
+                pt->t_index = compress_transfer_indicies(stats, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
 
                 err::require(pt->t_data != nullptr, "make_scales: out of memory");
                 err::require(pt->t_index != nullptr, "make_scales: out of memory");
+                std::memset(pt->t_data + pt->i_data * elem_size, 0, transfer_unused_size);
 
+                stats.data_bytes.fetch_add(data_size, std::memory_order_relaxed);
+
+                const vec_t total = (vec_t)(1 / math::pi);
+                transfer_data *t1 = pt->t_data;
+                const float *t2 = scratch.tdata_all.data();
+                for (unsigned x = 0; x < pt->i_data; x++, t1 += elem_size, t2++)
                 {
-                    std::lock_guard<std::mutex> guard(state.lock);
-                    state.transfer_data_bytes += data_size;
-                }
-
-                vec_t total = (vec_t)(1 / math::pi);
-                {
-                    unsigned x;
-                    transfer_data *t1 = pt->t_data;
-                    float *t2 = scratch.tdata_all.data();
-
-                    float f;
-                    for (x = 0; x < pt->i_data; x++, t1 += float_format_size[(int)state.options.transfer_compress_type], t2++)
-                    {
-                        f = (*t2) * total;
-                        float_compress(state.options.transfer_compress_type, t1, &f);
-                    }
+                    float f = (*t2) * total;
+                    float_compress(compress_type, t1, &f);
                 }
             }
 
-            {
-                std::lock_guard<std::mutex> guard(state.lock);
-                state.total_transfer += (size_t)count;
-            }
+            stats.total_transfer.fetch_add((size_t)count, std::memory_order_relaxed);
         }
 
         thread_local std::vector<float> tls_rgbdata_all;
 
-        void make_rgb_scales_item(rad_state &state, const int i)
+        void make_rgb_scales_item(rad_state &state, const sparse_transpose *transpose, transfer_stats &stats, const int i)
         {
-            unsigned j;
             vec3v delta;
             vec_t dist;
             int count;
             float trans[3];
             float trans_one;
             patch *pt;
-            patch *patch2;
             vec3v origin;
 
             scales_scratch &scratch = tls_scratch;
@@ -410,49 +567,19 @@ namespace rad
             lighting_scale = state.lightingconeinfo[(size_t)miptex][1];
             lighting_diversify = (lighting_power != 1.0 || lighting_scale != 1.0);
 
-            // find out which patch2's the patch collects light from
-            for (j = 0, patch2 = state.patches.data(); j < state.num_patches; j++, patch2++)
+            auto eval_pair = [&](unsigned j, const vec3v &transparency, bool useback)
             {
-                vec_t dot1;
-                vec_t dot2;
-                vec3v transparency = {1.0, 1.0, 1.0};
-                bool useback;
-                useback = false;
-
-                if (!state.check_vis_bit(state, (unsigned)i, j, transparency, scratch.fastfind_index) || ((unsigned)i == j))
-                {
-                    if (pt->translucent_b)
-                    {
-                        if (!check_vis_bit_backwards(state, (unsigned)i, j, backorigin, backnormal, transparency) || ((unsigned)i == j))
-                        {
-                            continue;
-                        }
-                        useback = true;
-                    }
-                    else
-                    {
-                        continue;
-                    }
-                }
-
+                const patch *patch2 = &state.patches[(size_t)j];
                 const vec3v &normal2 = plane_from_face_number(state, (unsigned)patch2->facenumber)->normal;
 
                 // calculate transference
-                math::subtract(patch2->origin, origin, delta);
-                if (useback)
-                {
-                    math::subtract(patch2->origin, backorigin, delta);
-                }
+                math::subtract(patch2->origin, useback ? backorigin : origin, delta);
                 // move emitter back to its plane
                 math::multiply_add(delta, -patch_hunt_offset, normal2, delta);
 
                 dist = math::normalize(delta);
-                dot1 = math::dot(delta, normal1);
-                if (useback)
-                {
-                    dot1 = math::dot(delta, backnormal);
-                }
-                dot2 = -math::dot(delta, normal2);
+                vec_t dot1 = math::dot(delta, useback ? backnormal : normal1);
+                vec_t dot2 = -math::dot(delta, normal2);
                 bool light_behind_surface = false;
                 if (dot1 <= math::normal_epsilon)
                 {
@@ -460,7 +587,7 @@ namespace rad
                 }
                 if (dot2 * dist <= minimum_patch_distance)
                 {
-                    continue;
+                    return;
                 }
 
                 if (lighting_diversify && !light_behind_surface)
@@ -480,21 +607,12 @@ namespace rad
                     {
                         trans_one = 0.0;
                     }
-                    vec_t sightarea;
-                    const vec3v *receiver_origin = &origin;
-                    const vec3v *receiver_normal = &normal1;
-                    const math::winding *emitter_winding;
-                    if (useback)
-                    {
-                        receiver_origin = &backorigin;
-                        receiver_normal = &backnormal;
-                    }
-                    emitter_winding = patch2->winding;
-                    sightarea = calc_sight_area(state, *receiver_origin, *receiver_normal, emitter_winding,
-                                                patch2->emitter_skylevel, lighting_power, lighting_scale);
+                    const vec3v *receiver_origin = useback ? &backorigin : &origin;
+                    const vec3v *receiver_normal = useback ? &backnormal : &normal1;
+                    vec_t sightarea = calc_sight_area(state, *receiver_origin, *receiver_normal, patch2->winding,
+                                                      patch2->emitter_skylevel, lighting_power, lighting_scale);
 
-                    vec_t frac;
-                    frac = dist / patch2->emitter_range;
+                    vec_t frac = dist / patch2->emitter_range;
                     frac = (frac - 0.5f) * 2.0f; // smooth transition between the two methods
                     frac = frac < 1 ? frac : 1;
                     frac = 0 > frac ? 0 : frac;
@@ -504,7 +622,7 @@ namespace rad
                 {
                     if (light_behind_surface)
                     {
-                        continue;
+                        return;
                     }
                 }
                 trans_one *= patch2->exposure;
@@ -535,13 +653,11 @@ namespace rad
 
                 if (trans_one <= 0.0)
                 {
-                    continue;
+                    return;
                 }
+                for (int x = 0; x < 3; x++)
                 {
-                    for (int x = 0; x < 3; x++)
-                    {
-                        trans[x] = (float)(trans[x] * patch2->area);
-                    }
+                    trans[x] = (float)(trans[x] * patch2->area);
                 }
 
                 t_rgbdata[0] = trans[0];
@@ -552,45 +668,69 @@ namespace rad
                 t_index++;
                 pt->i_data++;
                 count++;
+            };
+
+            // find out which patch2's the patch collects light from
+            if (transpose && !pt->translucent_b)
+            {
+                for_each_sparse_visible(state, *transpose, (unsigned)i, scratch.fastfind_index, eval_pair);
+            }
+            else
+            {
+                for (unsigned j = 0; j < state.num_patches; j++)
+                {
+                    vec3v transparency = {1.0, 1.0, 1.0};
+                    bool useback = false;
+
+                    if (!state.check_vis_bit(state, (unsigned)i, j, transparency, scratch.fastfind_index) || ((unsigned)i == j))
+                    {
+                        if (pt->translucent_b)
+                        {
+                            if (!check_vis_bit_backwards(state, (unsigned)i, j, backorigin, backnormal, transparency) || ((unsigned)i == j))
+                            {
+                                continue;
+                            }
+                            useback = true;
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+                    eval_pair(j, transparency, useback);
+                }
             }
 
             // copy the transfers out
             if (pt->i_data)
             {
-                unsigned data_size = pt->i_data * (unsigned)vector_format_size[(int)state.options.rgbtransfer_compress_type] + (unsigned)transfer_unused_size;
+                const auto compress_type = state.options.rgbtransfer_compress_type;
+                const unsigned elem_size = (unsigned)vector_format_size[(int)compress_type];
+                unsigned data_size = pt->i_data * elem_size + (unsigned)transfer_unused_size;
 
-                pt->t_rgb_data = (rgb_transfer_data *)std::calloc(data_size, 1);
-                pt->t_index = compress_transfer_indicies(state, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
+                pt->t_rgb_data = (rgb_transfer_data *)std::malloc(data_size);
+                pt->t_index = compress_transfer_indicies(stats, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
 
                 err::require(pt->t_rgb_data != nullptr, "make_rgb_scales: out of memory");
                 err::require(pt->t_index != nullptr, "make_rgb_scales: out of memory");
+                std::memset(pt->t_rgb_data + pt->i_data * elem_size, 0, transfer_unused_size);
 
+                stats.data_bytes.fetch_add(data_size, std::memory_order_relaxed);
+
+                const vec_t total = (vec_t)(1 / math::pi);
+                rgb_transfer_data *t1 = pt->t_rgb_data;
+                const float *t2 = tls_rgbdata_all.data();
+                float f[3];
+                for (unsigned x = 0; x < pt->i_data; x++, t1 += elem_size, t2 += 3)
                 {
-                    std::lock_guard<std::mutex> guard(state.lock);
-                    state.transfer_data_bytes += data_size;
-                }
-
-                vec_t total = (vec_t)(1 / math::pi);
-                {
-                    unsigned x;
-                    rgb_transfer_data *t1 = pt->t_rgb_data;
-                    float *t2 = tls_rgbdata_all.data();
-
-                    float f[3];
-                    for (x = 0; x < pt->i_data; x++, t1 += vector_format_size[(int)state.options.rgbtransfer_compress_type], t2 += 3)
-                    {
-                        f[0] = (float)(t2[0] * total);
-                        f[1] = (float)(t2[1] * total);
-                        f[2] = (float)(t2[2] * total);
-                        vector_compress(state.options.rgbtransfer_compress_type, t1, &f[0], &f[1], &f[2]);
-                    }
+                    f[0] = (float)(t2[0] * total);
+                    f[1] = (float)(t2[1] * total);
+                    f[2] = (float)(t2[2] * total);
+                    vector_compress(compress_type, t1, &f[0], &f[1], &f[2]);
                 }
             }
 
-            {
-                std::lock_guard<std::mutex> guard(state.lock);
-                state.total_transfer += (size_t)count;
-            }
+            stats.total_transfer.fetch_add((size_t)count, std::memory_order_relaxed);
         }
     }
 
@@ -717,56 +857,12 @@ namespace rad
             // enumerate visible pairs straight from the sparse columns
             // (o(visible), not the o(patches²) binary searches the cpu loop
             // does): column x holds partners y > x, so partners below i come
-            // from a one shot transposed pass outer x ascends, keeping every
-            // list in the ascending order the cpu loop walks
-            // the transposed lists are flat (count, prefix sum, fill): one
-            // allocation instead of a growing vector per patch
-            std::vector<size_t> below_first((size_t)state.num_patches + 1, 0);
-            std::vector<unsigned> above_count(state.num_patches);
-            threads::run((int)state.num_patches, [&](int x)
-                         {
-                             const sparse_column &column = state.sparse_columns[(size_t)x];
-                             unsigned count = 0;
-                             for (int r = 0; r < column.count; r++)
-                                 count += (unsigned)std::bitset<8>(column.row[r].values & 0xffu).count();
-                             above_count[(size_t)x] = count;
-                         });
-            for (unsigned x = 0; x < state.num_patches; x++)
-            {
-                const sparse_column &column = state.sparse_columns[x];
-                for (int r = 0; r < column.count; r++)
-                {
-                    const unsigned bits = column.row[r].values;
-                    const unsigned ybase = column.row[r].offset * 8;
-                    for (unsigned b = 0; b < 8; b++)
-                    {
-                        if (bits & (1u << b))
-                            below_first[ybase + b + 1]++;
-                    }
-                }
-            }
-            for (unsigned y = 0; y < state.num_patches; y++)
-                below_first[y + 1] += below_first[y];
-            // filled with x ascending, so every list keeps the ascending
-            // order the cpu loop walks
-            std::vector<unsigned> below_list(below_first[state.num_patches]);
-            {
-                std::vector<size_t> cursor(below_first.begin(), below_first.end() - 1);
-                for (unsigned x = 0; x < state.num_patches; x++)
-                {
-                    const sparse_column &column = state.sparse_columns[x];
-                    for (int r = 0; r < column.count; r++)
-                    {
-                        const unsigned bits = column.row[r].values;
-                        const unsigned ybase = column.row[r].offset * 8;
-                        for (unsigned b = 0; b < 8; b++)
-                        {
-                            if (bits & (1u << b))
-                                below_list[cursor[ybase + b]++] = x;
-                        }
-                    }
-                }
-            }
+            // from a parallel transposed pass keeping every list ascending
+            const sparse_transpose transpose = build_sparse_transpose(state);
+            const std::vector<size_t> &below_first = transpose.below_first;
+            const std::vector<unsigned> &above_count = transpose.above_count;
+            const std::vector<unsigned> &below_list = transpose.below_list;
+            transfer_stats stats;
 
             const double setup_seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - setup_started).count();
@@ -803,25 +899,25 @@ namespace rad
                     c.first[k + 1] = c.first[k] + (below_first[i + 1] - below_first[i]) + above_count[i];
                 }
                 c.pairs.resize(c.first[c.count]);
-                threads::run((int)c.count, [&](int k)
-                             {
-                                 const unsigned i = base + (unsigned)k;
-                                 size_t next = c.first[(size_t)k];
-                                 for (size_t b = below_first[i]; b < below_first[i + 1]; b++)
-                                     c.pairs[next++] = {(int32_t)i, (int32_t)below_list[b]};
+                threads::run((int)c.count, [&](int k) {
+                    const unsigned i = base + (unsigned)k;
+                    size_t next = c.first[(size_t)k];
+                    for (size_t b = below_first[i]; b < below_first[i + 1]; b++)
+                        c.pairs[next++] = {(int32_t)i, (int32_t)below_list[b]};
 
-                                 const sparse_column &column = state.sparse_columns[i];
-                                 for (int r = 0; r < column.count; r++)
-                                 {
-                                     const unsigned bits = column.row[r].values;
-                                     const unsigned ybase = column.row[r].offset * 8;
-                                     for (unsigned b = 0; b < 8; b++)
-                                     {
-                                         if (bits & (1u << b))
-                                             c.pairs[next++] = {(int32_t)i, (int32_t)(ybase + b)};
-                                     }
-                                 }
-                             });
+                    const sparse_column &column = state.sparse_columns[i];
+                    for (int r = 0; r < column.count; r++)
+                    {
+                        unsigned bits = column.row[r].values & 0xffu;
+                        const unsigned ybase = column.row[r].offset * 8;
+                        while (bits)
+                        {
+                            const unsigned b = ctz_u32(bits);
+                            bits &= bits - 1;
+                            c.pairs[next++] = {(int32_t)i, (int32_t)(ybase + b)};
+                        }
+                    }
+                });
                 pack_seconds += since(t0);
             };
 
@@ -830,76 +926,69 @@ namespace rad
             auto filter = [&](const chunk_buffers &c)
             {
                 const auto t0 = now();
-                threads::run((int)c.count, [&](int k)
-                             {
-                                 const unsigned i = c.base + (unsigned)k;
-                                 patch *pt = &state.patches[(size_t)i];
-                                 pt->i_index = 0;
-                                 pt->i_data = 0;
+                threads::run((int)c.count, [&](int k) {
+                    const unsigned i = c.base + (unsigned)k;
+                    patch *pt = &state.patches[(size_t)i];
+                    pt->i_index = 0;
+                    pt->i_data = 0;
 
-                                 scales_scratch &scratch = tls_scratch;
-                                 scratch.tindex_all.resize(state.num_patches + 1);
-                                 scratch.tdata_all.resize(state.num_patches + 1);
-                                 transfer_raw_index *t_index = scratch.tindex_all.data();
-                                 float *t_data = scratch.tdata_all.data();
-                                 int local_count = 0;
+                    scales_scratch &scratch = tls_scratch;
+                    scratch.tindex_all.resize(state.num_patches + 1);
+                    scratch.tdata_all.resize(state.num_patches + 1);
+                    transfer_raw_index *t_index = scratch.tindex_all.data();
+                    float *t_data = scratch.tdata_all.data();
+                    int local_count = 0;
 
-                                 const vec3v &normal1 =
-                                     plane_from_face_number(state, (unsigned)pt->facenumber)->normal;
-                                 int miptex = state.map->texinfo[(size_t)state.map->faces[(size_t)pt->facenumber].texinfo].miptex;
-                                 vec_t power = state.lightingconeinfo[(size_t)miptex][0];
-                                 vec_t scale = state.lightingconeinfo[(size_t)miptex][1];
-                                 bool diversify = (power != 1.0 || scale != 1.0);
+                    const vec3v &normal1 =
+                        plane_from_face_number(state, (unsigned)pt->facenumber)->normal;
+                    int miptex = state.map->texinfo[(size_t)state.map->faces[(size_t)pt->facenumber].texinfo].miptex;
+                    vec_t power = state.lightingconeinfo[(size_t)miptex][0];
+                    vec_t scale = state.lightingconeinfo[(size_t)miptex][1];
+                    bool diversify = (power != 1.0 || scale != 1.0);
 
-                                 for (size_t s = c.first[(size_t)k]; s < c.first[(size_t)k + 1]; s++)
-                                 {
-                                     float t = c.trans[s];
-                                     unsigned j = (unsigned)c.pairs[s].emitter;
-                                     if (std::isnan(t))
-                                     {
-                                         t = gpu_transfer_fallback(state, pt, &state.patches[(size_t)j],
-                                                                   normal1, power, scale, diversify);
-                                     }
-                                     if (t <= 0.0f)
-                                         continue;
-                                     *t_data = t;
-                                     *t_index = j;
-                                     t_data++;
-                                     t_index++;
-                                     pt->i_data++;
-                                     local_count++;
-                                 }
+                    for (size_t s = c.first[(size_t)k]; s < c.first[(size_t)k + 1]; s++)
+                    {
+                        float t = c.trans[s];
+                        unsigned j = (unsigned)c.pairs[s].emitter;
+                        if (std::isnan(t))
+                        {
+                            t = gpu_transfer_fallback(state, pt, &state.patches[(size_t)j],
+                                                      normal1, power, scale, diversify);
+                        }
+                        if (t <= 0.0f)
+                            continue;
+                        *t_data = t;
+                        *t_index = j;
+                        t_data++;
+                        t_index++;
+                        pt->i_data++;
+                        local_count++;
+                    }
 
-                                 if (pt->i_data)
-                                 {
-                                     unsigned data_size = pt->i_data
-                                         * (unsigned)float_format_size[(int)state.options.transfer_compress_type]
-                                         + (unsigned)transfer_unused_size;
-                                     pt->t_data = (transfer_data *)std::calloc(data_size, 1);
-                                     pt->t_index = compress_transfer_indicies(
-                                         state, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
-                                     err::require(pt->t_data != nullptr, "gpu_make_scales: out of memory");
-                                     err::require(pt->t_index != nullptr, "gpu_make_scales: out of memory");
-                                     {
-                                         std::lock_guard<std::mutex> guard(state.lock);
-                                         state.transfer_data_bytes += data_size;
-                                     }
-                                     vec_t total = (vec_t)(1 / math::pi);
-                                     transfer_data *t1 = pt->t_data;
-                                     float *t2 = scratch.tdata_all.data();
-                                     for (unsigned x = 0; x < pt->i_data;
-                                          x++, t1 += float_format_size[(int)state.options.transfer_compress_type], t2++)
-                                     {
-                                         float f = (*t2) * total;
-                                         float_compress(state.options.transfer_compress_type, t1, &f);
-                                     }
-                                 }
-                                 {
-                                     std::lock_guard<std::mutex> guard(state.lock);
-                                     state.total_transfer += (size_t)local_count;
-                                 }
-                                 progress::add(1);
-                             });
+                    if (pt->i_data)
+                    {
+                        const auto compress_type = state.options.transfer_compress_type;
+                        const unsigned elem_size = (unsigned)float_format_size[(int)compress_type];
+                        unsigned data_size = pt->i_data * elem_size + (unsigned)transfer_unused_size;
+                        pt->t_data = (transfer_data *)std::malloc(data_size);
+                        pt->t_index = compress_transfer_indicies(
+                            stats, scratch.tindex_all.data(), pt->i_data, &pt->i_index);
+                        err::require(pt->t_data != nullptr, "gpu_make_scales: out of memory");
+                        err::require(pt->t_index != nullptr, "gpu_make_scales: out of memory");
+                        std::memset(pt->t_data + pt->i_data * elem_size, 0, transfer_unused_size);
+                        stats.data_bytes.fetch_add(data_size, std::memory_order_relaxed);
+                        const vec_t total = (vec_t)(1 / math::pi);
+                        transfer_data *t1 = pt->t_data;
+                        const float *t2 = scratch.tdata_all.data();
+                        for (unsigned x = 0; x < pt->i_data; x++, t1 += elem_size, t2++)
+                        {
+                            float f = (*t2) * total;
+                            float_compress(compress_type, t1, &f);
+                        }
+                    }
+                    stats.total_transfer.fetch_add((size_t)local_count, std::memory_order_relaxed);
+                    progress::add(1);
+                });
                 filter_seconds += since(t0);
             };
 
@@ -948,6 +1037,7 @@ namespace rad
                 return false;
             }
 
+            stats.flush_to(state);
             progress::end();
             logging::file("      gpu transfers: pack %.2fs, gpu %.2fs, filter %.2fs (overlapped), setup %.2fs\n",
                           pack_seconds, gpu_seconds, filter_seconds, setup_seconds);
@@ -960,8 +1050,17 @@ namespace rad
     {
         if (state.options.rgb_transfers)
         {
+            sparse_transpose transpose;
+            const sparse_transpose *tp = nullptr;
+            if (state.options.method == vis_method::sparse_vismatrix)
+            {
+                transpose = build_sparse_transpose(state);
+                tp = &transpose;
+            }
+            transfer_stats stats;
             threads::run_phase("lighting", "computing light transfers", (int)state.num_patches,
-                               [&](int i) { make_rgb_scales_item(state, i); });
+                               [&](int i) { make_rgb_scales_item(state, tp, stats, i); });
+            stats.flush_to(state);
         }
         else
         {
@@ -971,8 +1070,17 @@ namespace rad
                 return;
             }
 #endif
+            sparse_transpose transpose;
+            const sparse_transpose *tp = nullptr;
+            if (state.options.method == vis_method::sparse_vismatrix)
+            {
+                transpose = build_sparse_transpose(state);
+                tp = &transpose;
+            }
+            transfer_stats stats;
             threads::run_phase("lighting", "computing light transfers", (int)state.num_patches,
-                               [&](int i) { make_scales_item(state, i); });
+                               [&](int i) { make_scales_item(state, tp, stats, i); });
+            stats.flush_to(state);
         }
     }
 
